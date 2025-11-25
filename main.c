@@ -71,6 +71,7 @@ struct TetrominoDef {
     struct WallkickDef wallkicks[4][4];
 };
 
+#define PIECE_TO_INDEX(type) ((int)(type) - 1) // enum hack
 struct TetrominoDef TData[TETCOUNT] = {0};
 
 
@@ -141,6 +142,9 @@ struct Matrix* matrix_construct() {
     ret->_heldPiece = INVALID;
     ret->_currentPiece = INVALID;
 
+    ret->_holdAllowable = true;
+    ret->_pieceStopped = false;
+
     ret->_hdropX = 0;
     ret->_hdropY = 0;
 
@@ -156,6 +160,7 @@ struct Matrix* matrix_construct() {
     M_matrix_make_board(ret); // default size
     return ret;
 }
+
 void M_matrix_destroy_board(struct Matrix* instance) {
     if (instance->_board == NULL) return;
 
@@ -165,6 +170,7 @@ void M_matrix_destroy_board(struct Matrix* instance) {
     free(instance->_board);
     instance->_board = NULL;
 }
+
 void M_matrix_make_board(struct Matrix* instance) {
     if (instance->_board != NULL) {
         M_matrix_destroy_board(instance);
@@ -203,29 +209,41 @@ void matrix_destruct(struct Matrix* instance) {
 int main() {
     init_main();
     init_palette();
-    int testgetch = 0;
 
-    move_sq(0, 0);
+    // int testgetch = 0;
 
-    while (true) {
-        //GCOLOR(I_PIECE, addch_sq(' '));
+    // move_sq(0, 0);
 
-        testgetch = getch();
-        switch (testgetch) {
-            case 'l':
-            GCOLOR(I_PIECE, addch_sq('>'));
-            break;
-            case 'j':
-            GCOLOR(O_PIECE, addch_sq('<'));
-            break;
-        }
-        refresh();
+    // while (true) {
+    //     //GCOLOR(I_PIECE, addch_sq(' '));
 
-    }
+    //     testgetch = getch();
+    //     switch (testgetch) {
+    //         case 'l':
+    //         GCOLOR(I_PIECE, addch_sq('>'));
+    //         break;
+    //         case 'j':
+    //         GCOLOR(O_PIECE, addch_sq('<'));
+    //         break;
+    //     }
+    //     refresh();
+
+    // }
 
     close_main();
 
-    printf("%d\n", testgetch);
+        for (int i = 0; i < TETCOUNT; i++) {
+        for (int j = 0; j < 4; j++) {
+            for (int y = 0; y < 4; y++) {
+                for (int x = 0; x < 4; x++) {
+                    printf("%d", TData[i].rotations[j].state[y][x].occupied);
+                }
+                printf("\n");
+            }
+            printf("\n");
+        }
+    }
+    //printf("%d\n", testgetch);
     return 0;
 }
 
@@ -294,6 +312,19 @@ enum TetrominoType_t toType(char tetromino_letter) {
     }
 }
 
+ColorPair_t toPieceColor(enum TetrominoType_t piece) {
+    switch (piece) {
+        case I: return GAME_COLORS.I_PIECE;
+        case J: return GAME_COLORS.J_PIECE;
+        case L: return GAME_COLORS.L_PIECE;
+        case O: return GAME_COLORS.O_PIECE;
+        case T: return GAME_COLORS.T_PIECE;
+        case S: return GAME_COLORS.S_PIECE;
+        case Z: return GAME_COLORS.Z_PIECE;
+        default: return GAME_COLORS.DEFAULT;
+    }
+}
+
 void parse_game_data() {
     int rotFile = open("./rotations.dat", O_RDONLY);
     if (rotFile < 0) printf("Could not load ./rotations.dat. Make sure executable is in the same folder as the source code.\n");
@@ -308,14 +339,88 @@ void parse_game_data() {
     #define CHUNKSIZE 256
     char buf[CHUNKSIZE] = {0};
     ssize_t read_count = 0;
+    size_t lineno = 1;
     enum TetrominoType_t currentPiece = INVALID;
+
+    // for reading in piece data
+    int curX = 0, curY = 0;
+    size_t rotCounter = 0;
+
+    // save myself time with these defines
+    // ACCEPT is a soft accept, it will not break upon invalid entry.
+    #define SET_STATE(next_state) { \
+        state = next_state; \
+        break; }
+    #define ACCEPT(to_accept, next_state) if (buf[c] == to_accept) { \
+        if (to_accept == '\n') ++lineno; \
+        state = next_state; \
+        break; }
+    #define DECLINE_IF(expr, filename) if ((expr)) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
+    #define DECLINE(filename) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
+    #define SKIP_WHITESPACE() if (isspace(buf[c]) && buf[c] != '\n') break
+
+
+    
     int state = 0; // state machine for parsing
-    while (read_count = read(rotFile, buf, CHUNKSIZE)) {
-        for (uint32_t c = 0; c < CHUNKSIZE; c++)
-        switch (state) {
-            case 0: // expect ':'
-            break;
-        }
+    while ((read_count = read(rotFile, buf, CHUNKSIZE))) {
+        for (uint32_t c = 0; c < read_count; c++)
+            switch (state) {
+                case 0: // expect ':'
+                    SKIP_WHITESPACE();
+                    ACCEPT('\n', 0); // newline = stay in state 0
+                    ACCEPT(':', 1);
+                    DECLINE("rotations.dat"); // fallthrough
+                break;
+                case 1: // expect a piece name
+                    SKIP_WHITESPACE();
+                    if (currentPiece != INVALID) {
+                        DECLINE_IF(buf[c] != '\n', "rotations.dat"); // accept only one
+                        ACCEPT('\n', 2);
+                    }
+                    currentPiece = toType(buf[c]);
+                    if (currentPiece == INVALID)
+                        FAILF("Unexpected piece type provided in rotations.dat(%ld): %c\n", lineno, buf[c])
+                    else break; // accept valid piece
+                break;
+                case 2: // expect piece data 
+                    SKIP_WHITESPACE();
+                    ACCEPT('$', 0);
+                    if (buf[c] == ':') {
+                        curX = 0;
+                        curY = 0;
+                        rotCounter = 0;
+                        currentPiece = INVALID;
+                        SET_STATE(1); // reset state if piece data done
+                    }
+                    if (buf[c] == '\n') {
+                        ++curY;
+                        curX = 0;
+                        DECLINE_IF(curY > 4, "rotations.dat"); // out of range
+                        ACCEPT('\n', 2);
+                    }
+                    if (buf[c] == '>') {
+                        curY = -1; // workaround
+                        rotCounter++;
+                        SET_STATE(2);
+                    }
+                    DECLINE_IF(!(buf[c] == '0' || buf[c] == '1'), "rotation.dat");
+                    struct TetrominoState* currentState = TData[PIECE_TO_INDEX(currentPiece)].rotations;
+                    if (buf[c] == '0') {
+                        currentState[rotCounter].state[curY][curX].occupied = false;
+                        currentState[rotCounter].state[curY][curX].col = GAME_COLORS.DEFAULT;
+                        ++curX; // goes one past the last character, normally
+                        SET_STATE(2);
+                        DECLINE_IF(curX > 4, "rotation.dat"); // out of range
+                    }
+                    if (buf[c] == '1') {
+                        currentState[rotCounter].state[curY][curX].occupied = true;
+                        currentState[rotCounter].state[curY][curX].col = toPieceColor(currentPiece);
+                        ++curX; // goes one past the last character normally
+                        SET_STATE(2);
+                        DECLINE_IF(curX > 4, "rotation.dat"); // out of range
+                    }
+                break;
+            }
     }
 
     close(rotFile);
