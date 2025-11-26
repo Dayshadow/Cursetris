@@ -232,7 +232,7 @@ int main() {
 
     close_main();
 
-        for (int i = 0; i < TETCOUNT; i++) {
+    for (int i = 0; i < TETCOUNT; i++) {
         for (int j = 0; j < 4; j++) {
             for (int y = 0; y < 4; y++) {
                 for (int x = 0; x < 4; x++) {
@@ -242,6 +242,13 @@ int main() {
             }
             printf("\n");
         }
+        for (int starting = 0; starting < 4; starting++) {
+            for (int ending = 0; ending < 4; ending++) {
+                for (int off = 0; off < 4; off++)
+                    printf("Piece: %d, Rot: %d%d, x: %d, y: %d\n", i, starting, ending, TData[i].wallkicks[starting][ending].offsets[off][0], TData[i].wallkicks[starting][ending].offsets[off][1]);
+            }
+        }
+            printf("\n");
     }
     //printf("%d\n", testgetch);
     return 0;
@@ -325,18 +332,25 @@ ColorPair_t toPieceColor(enum TetrominoType_t piece) {
     }
 }
 
-void parse_game_data() {
-    int rotFile = open("./rotations.dat", O_RDONLY);
-    if (rotFile < 0) printf("Could not load ./rotations.dat. Make sure executable is in the same folder as the source code.\n");
-    int kckFile = open("./wallkicks.dat", O_RDONLY);
-    if (kckFile < 0) printf("Could not load ./wallkicks.dat. Make sure executable is in the same folder as the source code.\n");
-    if (rotFile < 0 || kckFile < 0) {
-        if (rotFile > 0) close(rotFile);
-        if (kckFile > 0) close(kckFile);
-        exit(1);
-    }
+// parsing defines
+#define CHUNKSIZE 256
+// same as accept, but doesn't test for character/newline
+#define SET_STATE(next_state) { \
+    state = next_state; \
+    break; }
+// ACCEPT is a soft accept, it will not break upon invalid entry.
+#define ACCEPT(to_accept, next_state) if (buf[c] == to_accept) { \
+    if (to_accept == '\n') ++lineno; \
+    state = next_state; \
+    break; }
+#define DECLINE_IF(expr, filename) if ((expr)) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
+#define DECLINE(filename) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
+#define SKIP_WHITESPACE() if (isspace(buf[c]) && buf[c] != '\n') break
 
-    #define CHUNKSIZE 256
+void parse_rotations_file() {
+    int rotFile = open("./rotations.dat", O_RDONLY);
+    if (rotFile < 0) FAIL("Could not load ./rotations.dat. Make sure executable is in the same folder as the source code.\n");
+
     char buf[CHUNKSIZE] = {0};
     ssize_t read_count = 0;
     size_t lineno = 1;
@@ -346,24 +360,9 @@ void parse_game_data() {
     int curX = 0, curY = 0;
     size_t rotCounter = 0;
 
-    // save myself time with these defines
-    // ACCEPT is a soft accept, it will not break upon invalid entry.
-    #define SET_STATE(next_state) { \
-        state = next_state; \
-        break; }
-    #define ACCEPT(to_accept, next_state) if (buf[c] == to_accept) { \
-        if (to_accept == '\n') ++lineno; \
-        state = next_state; \
-        break; }
-    #define DECLINE_IF(expr, filename) if ((expr)) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
-    #define DECLINE(filename) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
-    #define SKIP_WHITESPACE() if (isspace(buf[c]) && buf[c] != '\n') break
-
-
-    
     int state = 0; // state machine for parsing
     while ((read_count = read(rotFile, buf, CHUNKSIZE))) {
-        for (uint32_t c = 0; c < read_count; c++)
+        for (uint32_t c = 0; c < read_count; c++) {
             switch (state) {
                 case 0: // expect ':'
                     SKIP_WHITESPACE();
@@ -379,12 +378,12 @@ void parse_game_data() {
                     }
                     currentPiece = toType(buf[c]);
                     if (currentPiece == INVALID)
-                        FAILF("Unexpected piece type provided in rotations.dat(%ld): %c\n", lineno, buf[c])
-                    else break; // accept valid piece
+                        FAILF("Unexpected piece type provided in rotations.dat(%ld): %c\n", lineno, buf[c]);
+                    // accept valid piece
                 break;
-                case 2: // expect piece data 
+                case 2: // parse piece data 
                     SKIP_WHITESPACE();
-                    ACCEPT('$', 0);
+                    ACCEPT('$', 99);
                     if (buf[c] == ':') {
                         curX = 0;
                         curY = 0;
@@ -420,11 +419,122 @@ void parse_game_data() {
                         DECLINE_IF(curX > 4, "rotation.dat"); // out of range
                     }
                 break;
+                default: break;
             }
+        }
     }
 
-    close(rotFile);
+
+}
+
+void parse_kicks_file() {
+    int kckFile = open("./wallkicks.dat", O_RDONLY);
+    if (kckFile < 0) FAIL("Could not load ./wallkicks.dat. Make sure executable is in the same folder as the source code.\n");
+    
+    char buf[CHUNKSIZE] = {0};
+    ssize_t read_count = 0;
+    size_t lineno = 1;
+    enum TetrominoType_t currentPiece = INVALID;
+
+    int start_rot = -1, end_rot = -1;
+
+    int offset_row = 0;
+    int offset_col = 0; // for parsing pairs
+    int digits_read = 0; // for error checking
+    bool negate = false;
+
+    int state = 0; // state machine for parsing
+    while ((read_count = read(kckFile, buf, CHUNKSIZE))) {
+        for (uint32_t c = 0; c < read_count; c++) {
+            switch (state) {
+                case 0: // expect ':'
+                    SKIP_WHITESPACE();
+                    ACCEPT('\n', 0); // newline = stay in state 0
+                    ACCEPT(':', 1);
+                    DECLINE("wallkicks.dat"); // fallthrough
+                break;
+                case 1: // expect a piece name
+                    SKIP_WHITESPACE();
+                    if (currentPiece != INVALID) {
+                        DECLINE_IF(buf[c] != '\n', "wallkicks.dat"); // accept only one
+                        ACCEPT('\n', 2);
+                    }
+                    currentPiece = toType(buf[c]);
+                    if (currentPiece == INVALID)
+                        FAILF("Unexpected piece type provided in wallkicks.dat(%ld): %c\n", lineno, buf[c])
+                    // accept valid piece
+                break;
+                case 2: // expect #
+                    ACCEPT('#', 3);
+                    DECLINE("wallkicks.dat");
+                break;
+                case 3: // parse starting rotation state
+                    if (isdigit(buf[c])) {
+                        start_rot = buf[c] - '0';
+                        SET_STATE(4);
+                    }
+                    DECLINE("wallkicks.dat");
+                break;
+                case 4: // parse ending rotation state
+                    if (isdigit(buf[c])) {
+                        end_rot = buf[c] - '0';
+                        SET_STATE(5);
+                    }
+                    DECLINE("wallkicks.dat");
+                break;
+                case 5: // expect newline after state definition
+                    SKIP_WHITESPACE();
+                    ACCEPT('\n', 6);
+                break;
+                case 6: // parse offset pairs
+                    SKIP_WHITESPACE();
+                    if (buf[c] == '#' || buf[c] == ':') {
+                        offset_row = 0;
+                        offset_col = 0;
+                        negate = false;
+                        start_rot = -1;
+                        end_rot = -1;
+                    }
+                    ACCEPT('$', 99);
+                    ACCEPT('#', 3);
+                    if (buf[c] == ':') currentPiece = INVALID;
+                    ACCEPT(':', 1);
+                    if (buf[c] == '\n') {
+                        ++offset_row;
+                        offset_col = 0;
+                        digits_read = 0;
+                        DECLINE_IF(offset_row > 4, "wallkicks.dat");
+                        ACCEPT('\n', 6);
+                    }
+                    if (buf[c] == '-') {
+                        negate = true;
+                        SET_STATE(6); // stay in state
+                    }
+                    if (buf[c] == ',') {
+                        negate = false; // reset
+                        ++offset_col;
+                        DECLINE_IF(offset_col > 1, "wallkicks.dat");
+                        SET_STATE(6);
+                    }
+                    if (isdigit(buf[c]) && digits_read < 2) { // accept digit
+                        // long line, but sets the wall kick data of the current piece in TData based on the parse file
+                        TData[PIECE_TO_INDEX(currentPiece)].wallkicks[start_rot][end_rot].offsets[offset_row][offset_col] = (int8_t)((negate? -1 : 1) * (buf[c] - '0'));
+                        ++digits_read;
+                        SET_STATE(6); // stay in state
+                    }
+                    DECLINE("wallkicks.dat");
+                break;
+                default: break;
+            }
+        }
+    }
+    
     close(kckFile);
+}
+
+void parse_game_data() {
+    parse_rotations_file();
+    parse_kicks_file();
 }
 
 void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno) {
