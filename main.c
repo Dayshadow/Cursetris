@@ -2,9 +2,10 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <math.h>
+#include <sys/fcntl.h>
+#include <ctype.h>
 
-
-// DEFINES -------------------------------------------------------------------
+// DEFINES ----------------------------------------
 #define COLOR(x, stmt) {attron(COLOR_PAIR(x)); \
 stmt; \
 attroff(COLOR_PAIR(x));}
@@ -17,81 +18,304 @@ attroff(COLOR_PAIR(x));}
 #define C_RESCALE(x) ((short int)((float)x * 3.90625f))
 #define SOLID(r, g, b) r, g, b, r, g, b // duplicate pairs
 
+#define FAIL(msg) { \
+  endwin(); \
+  printf(msg); \
+  exit(1); \
+} 
+#define FAILF(msg, fmt...) { \
+  endwin(); \
+  printf(msg, fmt); \
+  exit(1); \
+} 
 typedef uint8_t ColorPair_t;
 
 // square-approximate version of the character printing functions
-#define mvaddch_sq(p1, p2, p3) (mvaddch((p1), (p2) * 2, (p3)), addch((p3)))
-#define addch_sq(p1) addch((p1)), addch((p1)); 
-#define move_sq(y, x) move((y), (x * 2))
+#define mvaddch_sq(y, x, c) (mvaddch((y), (x) * 2, (c)), addch((c)))
 
+#define addch_sq(p1) (addch((p1)), addch((p1)))
+
+#define move_sq(y, x) (move((y), (x) * 2))
+
+// END DEFINES ---------------------------------------
+
+// STRUCTS -------------------------------------------
 struct ColorSet {
+    ColorPair_t DEFAULT;
     ColorPair_t I_PIECE, J_PIECE, L_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE;
 } GAME_COLORS;
+#define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt)) // version that aliases colors stored within the global struct
 
-#define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt))
-// END DEFINES ---------------------------------------------------------------
+struct Mino {
+    bool occupied;
+    ColorPair_t col;
+};
 
-// FUNCTS ------------------------
+#define TETCOUNT 7
+enum TetrominoType_t {
+    INVALID, I, J, L, S, Z, O, T
+};
+
+#define STATE_DIM 4
+// Represents a single rotation
+struct TetrominoState {
+    struct Mino state[STATE_DIM][STATE_DIM];
+};
+// What the piece should do if attempting to rotate into an occupied cell
+struct WallkickDef {
+    int8_t offsets[4][2]; // Every element on the list is tried in priority order until an offset works.
+};
+// represents all rotations, as well as wallkicks
+struct TetrominoDef {
+    struct TetrominoState rotations[4];
+    struct WallkickDef wallkicks[4][4];
+};
+
+#define PIECE_TO_INDEX(type) ((int)(type) - 1) // enum hack
+struct TetrominoDef TData[TETCOUNT] = {0};
+
+
+// unit for game board positions
+typedef uint16_t minopos_t;
+
+// The game board, handles most of game state
+struct Matrix {
+    minopos_t _nrows;
+    minopos_t _ncols;
+
+    // place where pieces start from
+    minopos_t _rootX;
+    minopos_t _rootY;
+
+    minopos_t _tetX;
+    minopos_t _tetY;
+
+    // drop position location if the piece were to fall all the way
+    minopos_t _hdropX;
+    minopos_t _hdropY;
+
+    uint32_t _updateFrameCounter; // Counts until it reaches updateFrameDelay, resets to zero, and updates pieces once.
+    uint32_t _updateFrameDelay;
+
+    uint32_t _lockCounter; 
+    uint32_t _lockDelay; // time piece is allowed to be in contact with the floor before it sticks
+    bool _pieceStopped; // if the piece is currently nudging another piece
+
+    enum TetrominoType_t _currentPiece;
+    uint8_t _currentRot;
+
+    enum TetrominoType_t _heldPiece; // tetris holding
+    bool _holdAllowable;
+
+    size_t _linesCleared;
+
+    // actual game data
+    struct Mino** _board;
+};
+// END STRUCTS ---------------------------------------
+
+// FUNCTS --------------------------------------------
 uint8_t set_rgb_pair(uint8_t fr, uint8_t fb, uint8_t fg, uint8_t br, uint8_t bg, uint8_t bb);
 void init_main();
 void init_palette();
 void close_main();
 void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno);
-// END FUNCS --------------------
+enum TetrominoType_t toType(char tetromino_letter);
+void parse_game_data();
+
+// member functs ------
+
+// create piece data
+void M_matrix_make_board(struct Matrix*);
+
+// initialize class
+struct Matrix* matrix_construct() {
+    struct Matrix* ret = (struct Matrix*)calloc(1, sizeof(struct Matrix));
+    ret->_ncols = 10; // these could be #defines, but I feel like making it adjustable
+    ret->_nrows = 24;
+
+    ret->_rootX = 3;
+    ret->_rootY = 3;
+
+    ret->_tetX = ret->_rootX;
+    ret->_tetY = ret->_rootY;
+
+    ret->_heldPiece = INVALID;
+    ret->_currentPiece = INVALID;
+    ret->_currentRot = 0;
+
+    ret->_holdAllowable = true;
+    ret->_pieceStopped = false;
+
+    ret->_hdropX = 0;
+    ret->_hdropY = 0;
+
+    ret->_updateFrameCounter = 0;
+    ret->_updateFrameDelay = 40;
+
+    ret->_lockCounter = 0;
+    ret->_lockDelay = 60;
+
+    ret->_linesCleared = 0;
+
+    ret->_board = NULL;
+    M_matrix_make_board(ret); // default size
+    return ret;
+}
+
+void M_matrix_destroy_board(struct Matrix* instance) {
+    if (instance->_board == NULL) return;
+
+    for (minopos_t row = 0; row < instance->_nrows; row++) {
+        free(instance->_board[row]);
+    }
+    free(instance->_board);
+    instance->_board = NULL;
+}
+
+void M_matrix_make_board(struct Matrix* instance) {
+    if (instance->_board != NULL) {
+        M_matrix_destroy_board(instance);
+    }
+
+    instance->_board = (struct Mino**)calloc(instance->_nrows, sizeof(struct Mino*));
+    for (minopos_t row = 0; row < instance->_nrows; row++) {
+        instance->_board[row] = (struct Mino*)calloc(instance->_ncols, sizeof(struct Mino));
+        struct Mino tmp;
+        tmp.occupied = true;
+        tmp.col = GAME_COLORS.I_PIECE;
+        instance->_board[row][0] = tmp;
+    }
+}
+// resize overload
+void M_matrix_make_board_rs(struct Matrix* instance, minopos_t p_nrows, minopos_t p_ncols) {
+    if (instance->_board != NULL) {
+        M_matrix_destroy_board(instance);
+    }
+    instance->_nrows = p_nrows;
+    instance->_ncols = p_ncols;
+
+    instance->_board = (struct Mino**)calloc(p_nrows, sizeof(struct Mino*));
+    for (minopos_t row = 0; row < p_nrows; row++) {
+        instance->_board[row] = (struct Mino*)calloc(p_ncols, sizeof(struct Mino));
+    }
+}
+
+void matrix_draw(struct Matrix* instance) {
+    int winx, winy;
+    getmaxyx(stdscr, winy, winx);
+    winx /= 2;
+    
+    int startx = (winx / 2) - (instance->_ncols / 2);
+    int starty = (winy / 2) - (instance->_nrows / 2);
+
+    for (int y = starty; y < instance->_nrows + starty; y++) {
+        if (y < 0 || y > winy - 3) {
+            GCOLOR(DEFAULT, mvaddstr(0, winx, "^ Make window taller! ^"));
+            GCOLOR(DEFAULT, mvaddstr(winy - 1, winx, "v Make window taller! v"));
+            continue;
+        }
+        for (int x = startx; x < instance->_ncols + startx; x++) {
+            if (x < 0 || x > winx - 3) {
+                GCOLOR(DEFAULT, mvaddstr(winy / 2, 0, "<- Make window wider! ->"));
+                continue;
+            }
+            struct Mino* mino = &instance->_board[y - starty][x - startx];
+            if (mino->occupied)
+                COLOR(mino->col, mvaddch_sq(y, x, ' '))
+            else
+                GCOLOR(DEFAULT, mvaddch_sq(y, x, ' '));
+        }
+    }
+}
+
+void matrix_destruct(struct Matrix* instance) {
+    M_matrix_destroy_board(instance);
+    free(instance);
+}
+// end member functs --
+
+// END FUNCS ----------------------------------------
 
 
 int main() {
     init_main();
     init_palette();
 
-    move_sq(0, 0);
-    GCOLOR(I_PIECE, mvaddch_sq(0, 0, ' '));
-    GCOLOR(J_PIECE, mvaddch_sq(1, 0, ' '));
-    GCOLOR(L_PIECE, mvaddch_sq(2, 0, ' '));
-    GCOLOR(O_PIECE, mvaddch_sq(3, 0, ' '));
-    GCOLOR(T_PIECE, mvaddch_sq(4, 0, ' '));
-    GCOLOR(S_PIECE, mvaddch_sq(5, 0, ' '));
-    GCOLOR(Z_PIECE, mvaddch_sq(6, 0, ' '));
-    refresh();
+    // int testgetch = 0;
 
+    // move_sq(0, 0);
+
+    // while (true) {
+    //     //GCOLOR(I_PIECE, addch_sq(' '));
+
+    //     testgetch = getch();
+    //     switch (testgetch) {
+    //         case 'l':
+    //         GCOLOR(I_PIECE, addch_sq('>'));
+    //         break;
+    //         case 'j':
+    //         GCOLOR(O_PIECE, addch_sq('<'));
+    //         break;
+    //     }
+    //     refresh();
+
+    // }
+    struct Matrix* board = matrix_construct();
+    while (true) {
+        clear();
+        matrix_draw(board);
+        refresh();
+        usleep(16000);
+    }
+    matrix_destruct(board);
     close_main();
+
+    // for (int i = 0; i < TETCOUNT; i++) {
+    //     for (int j = 0; j < 4; j++) {
+    //         for (int y = 0; y < STATE_DIM; y++) {
+    //             for (int x = 0; x < STATE_DIM; x++) {
+    //                 printf("%d", TData[i].rotations[j].state[y][x].occupied);
+    //             }
+    //             printf("\n");
+    //         }
+    //         printf("\n");
+    //     }
+    //     for (int starting = 0; starting < 4; starting++) {
+    //         for (int ending = 0; ending < 4; ending++) {
+    //             for (int off = 0; off < 4; off++)
+    //                 printf("Piece: %d, Rot: %d%d, x: %d, y: %d\n", i, starting, ending, TData[i].wallkicks[starting][ending].offsets[off][0], TData[i].wallkicks[starting][ending].offsets[off][1]);
+    //         }
+    //     }
+    //         printf("\n");
+    // }
+    // printf("%ld\n", sizeof(TData));
     return 0;
 }
 
 
 // allocates two color slots from the global state, for fg/bg color. returns pair number
 uint8_t set_rgb_pair(uint8_t fr, uint8_t fb, uint8_t fg, uint8_t br, uint8_t bg, uint8_t bb) {
-    static ColorPair_t palette_back = 2; // current pair index for set function. Only really works when set to 2 initially.
-    if (palette_back >= 126) {
-        endwin();
-        printf("Too many color pairs created!\n");
-        exit(1);
-    }
+    static ColorPair_t S_palette_back = 2; // current pair index for set function. Only really works when set to 2 initially.
+    if (S_palette_back >= 126) FAIL("Too many color pairs created!\n");
+
     int err_ret;
     // set fg/bg color to make a pair
-    err_ret = init_color((short)(palette_back * 2 + 0), C_RESCALE(fr), C_RESCALE(fg), C_RESCALE(fb));
-    if (err_ret == ERR) {
-        endwin();
-        printf("init_color for fg failed, for one reason or another. (paletteno = %d)\n", palette_back);
-        abort();
-    }
-    err_ret = init_color((short)(palette_back * 2 + 1), C_RESCALE(br), C_RESCALE(bg), C_RESCALE(bb));
-    if (err_ret == ERR) {
-        endwin();
-        printf("init_color for bg failed, for one reason or another. (paletteno = %d)\n", palette_back);
-        abort();
-    }
-    err_ret = init_pair(palette_back, (short)(palette_back * 2 + 0), (short)(palette_back * 2 + 1));
-    if (err_ret == ERR) {
-        endwin();
-        printf("init_pair failed, for one reason or another. (paletteno = %d)\n", palette_back);
-        abort();
-    }
-    palette_back++;
-    return palette_back - 1;
+    err_ret = init_color((short)(S_palette_back * 2 + 0), C_RESCALE(fr), C_RESCALE(fg), C_RESCALE(fb));
+    if (err_ret == ERR) FAILF("init_color for fg failed, for one reason or another. (paletteno = %d)\n", S_palette_back);
+     
+    err_ret = init_color((short)(S_palette_back * 2 + 1), C_RESCALE(br), C_RESCALE(bg), C_RESCALE(bb));
+    if (err_ret == ERR) FAILF("init_color for bg failed, for one reason or another. (paletteno = %d)\n", S_palette_back);
+
+    err_ret = init_pair(S_palette_back, (short)(S_palette_back * 2 + 0), (short)(S_palette_back * 2 + 1));
+    if (err_ret == ERR) FAILF("init_pair failed, for one reason or another. (paletteno = %d)\n", S_palette_back);
+
+    S_palette_back++;
+    return S_palette_back - 1;
 }
 
 void init_main() {
+    parse_game_data();
     initscr();
     start_color();
     if (!can_change_color()) {
@@ -102,6 +326,7 @@ void init_main() {
 
     clear();
     curs_set(0);
+    noecho();
 }
 
 void close_main() {
@@ -117,7 +342,237 @@ void init_palette() {
     GAME_COLORS.T_PIECE = set_rgb_pair(SOLID(0xa7, 0x1f, 0xe0));
     GAME_COLORS.S_PIECE = set_rgb_pair(SOLID(0x46, 0xe0, 0x1f));
     GAME_COLORS.Z_PIECE = set_rgb_pair(SOLID(0xe3, 0x22, 0x22));
+}
 
+enum TetrominoType_t toType(char tetromino_letter) {
+    switch (tetromino_letter) {
+        case 'I': case 'i': return I;
+        case 'J': case 'j': return J;
+        case 'L': case 'l': return L;
+        case 'O': case 'o': return O;
+        case 'T': case 't': return T;
+        case 'S': case 's': return S;
+        case 'Z': case 'z': return Z;
+        default: return INVALID;
+    }
+}
+
+ColorPair_t toPieceColor(enum TetrominoType_t piece) {
+    switch (piece) {
+        case I: return GAME_COLORS.I_PIECE;
+        case J: return GAME_COLORS.J_PIECE;
+        case L: return GAME_COLORS.L_PIECE;
+        case O: return GAME_COLORS.O_PIECE;
+        case T: return GAME_COLORS.T_PIECE;
+        case S: return GAME_COLORS.S_PIECE;
+        case Z: return GAME_COLORS.Z_PIECE;
+        default: return GAME_COLORS.DEFAULT;
+    }
+}
+
+// parsing defines
+#define CHUNKSIZE 256
+// same as accept, but doesn't test for character/newline
+#define SET_STATE(next_state) { \
+    state = next_state; \
+    break; }
+// ACCEPT is a soft accept, it will not break upon invalid entry.
+#define ACCEPT(to_accept, next_state) if (buf[c] == to_accept) { \
+    if (to_accept == '\n') ++lineno; \
+    state = next_state; \
+    break; }
+#define DECLINE_IF(expr, filename) if ((expr)) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
+#define DECLINE(filename) FAILF("main.c(%d): Unexpected character %c in %s(%ld)\n", __LINE__, buf[c], filename, lineno)
+#define SKIP_WHITESPACE() if (isspace(buf[c]) && buf[c] != '\n') break
+
+void parse_rotations_file() {
+    int rotFile = open("./rotations.dat", O_RDONLY);
+    if (rotFile < 0) FAIL("Could not load ./rotations.dat. Make sure executable is in the same folder as the source code.\n");
+
+    char buf[CHUNKSIZE] = {0};
+    ssize_t read_count = 0;
+    size_t lineno = 1;
+    enum TetrominoType_t currentPiece = INVALID;
+
+    // for reading in piece data
+    int curX = 0, curY = 0;
+    size_t rotCounter = 0;
+
+    int state = 0; // state machine for parsing
+    while ((read_count = read(rotFile, buf, CHUNKSIZE))) {
+        for (uint32_t c = 0; c < read_count; c++) {
+            switch (state) {
+                case 0: // expect ':'
+                    SKIP_WHITESPACE();
+                    ACCEPT('\n', 0); // newline = stay in state 0
+                    ACCEPT(':', 1);
+                    DECLINE("rotations.dat"); // fallthrough
+                break;
+                case 1: // expect a piece name
+                    SKIP_WHITESPACE();
+                    if (currentPiece != INVALID) {
+                        DECLINE_IF(buf[c] != '\n', "rotations.dat"); // accept only one
+                        ACCEPT('\n', 2);
+                    }
+                    currentPiece = toType(buf[c]);
+                    if (currentPiece == INVALID)
+                        FAILF("Unexpected piece type provided in rotations.dat(%ld): %c\n", lineno, buf[c]);
+                    // accept valid piece
+                break;
+                case 2: // parse piece data 
+                    SKIP_WHITESPACE();
+                    ACCEPT('$', 99);
+                    if (buf[c] == ':') {
+                        curX = 0;
+                        curY = 0;
+                        rotCounter = 0;
+                        currentPiece = INVALID;
+                        SET_STATE(1); // reset state if piece data done
+                    }
+                    if (buf[c] == '\n') {
+                        ++curY;
+                        curX = 0;
+                        DECLINE_IF(curY > STATE_DIM, "rotations.dat"); // out of range
+                        ACCEPT('\n', 2);
+                    }
+                    if (buf[c] == '>') {
+                        curY = -1; // workaround
+                        rotCounter++;
+                        SET_STATE(2);
+                    }
+                    DECLINE_IF(!(buf[c] == '0' || buf[c] == '1'), "rotation.dat");
+                    struct TetrominoState* currentState = TData[PIECE_TO_INDEX(currentPiece)].rotations;
+                    if (buf[c] == '0') {
+                        currentState[rotCounter].state[curY][curX].occupied = false;
+                        currentState[rotCounter].state[curY][curX].col = GAME_COLORS.DEFAULT;
+                        ++curX; // goes one past the last character, normally
+                        SET_STATE(2);
+                        DECLINE_IF(curX > STATE_DIM, "rotation.dat"); // out of range
+                    }
+                    if (buf[c] == '1') {
+                        currentState[rotCounter].state[curY][curX].occupied = true;
+                        currentState[rotCounter].state[curY][curX].col = toPieceColor(currentPiece);
+                        ++curX; // goes one past the last character normally
+                        SET_STATE(2);
+                        DECLINE_IF(curX > STATE_DIM, "rotation.dat"); // out of range
+                    }
+                break;
+                default: break;
+            }
+        }
+    }
+
+
+}
+
+void parse_kicks_file() {
+    int kckFile = open("./wallkicks.dat", O_RDONLY);
+    if (kckFile < 0) FAIL("Could not load ./wallkicks.dat. Make sure executable is in the same folder as the source code.\n");
+    
+    char buf[CHUNKSIZE] = {0};
+    ssize_t read_count = 0;
+    size_t lineno = 1;
+    enum TetrominoType_t currentPiece = INVALID;
+
+    int start_rot = -1, end_rot = -1;
+
+    int offset_row = 0;
+    int offset_col = 0; // for parsing pairs
+    int digits_read = 0; // for error checking
+    bool negate = false;
+
+    int state = 0; // state machine for parsing
+    while ((read_count = read(kckFile, buf, CHUNKSIZE))) {
+        for (uint32_t c = 0; c < read_count; c++) {
+            switch (state) {
+                case 0: // expect ':'
+                    SKIP_WHITESPACE();
+                    ACCEPT('\n', 0); // newline = stay in state 0
+                    ACCEPT(':', 1);
+                    DECLINE("wallkicks.dat"); // fallthrough
+                break;
+                case 1: // expect a piece name
+                    SKIP_WHITESPACE();
+                    if (currentPiece != INVALID) {
+                        DECLINE_IF(buf[c] != '\n', "wallkicks.dat"); // accept only one
+                        ACCEPT('\n', 2);
+                    }
+                    currentPiece = toType(buf[c]);
+                    if (currentPiece == INVALID)
+                        FAILF("Unexpected piece type provided in wallkicks.dat(%ld): %c\n", lineno, buf[c])
+                    // accept valid piece
+                break;
+                case 2: // expect #
+                    ACCEPT('#', 3);
+                    DECLINE("wallkicks.dat");
+                break;
+                case 3: // parse starting rotation state
+                    if (isdigit(buf[c])) {
+                        start_rot = buf[c] - '0';
+                        SET_STATE(4);
+                    }
+                    DECLINE("wallkicks.dat");
+                break;
+                case 4: // parse ending rotation state
+                    if (isdigit(buf[c])) {
+                        end_rot = buf[c] - '0';
+                        SET_STATE(5);
+                    }
+                    DECLINE("wallkicks.dat");
+                break;
+                case 5: // expect newline after state definition
+                    SKIP_WHITESPACE();
+                    ACCEPT('\n', 6);
+                break;
+                case 6: // parse offset pairs
+                    SKIP_WHITESPACE();
+                    if (buf[c] == '#' || buf[c] == ':') {
+                        offset_row = 0;
+                        offset_col = 0;
+                        negate = false;
+                        start_rot = -1;
+                        end_rot = -1;
+                    }
+                    ACCEPT('$', 99);
+                    ACCEPT('#', 3);
+                    if (buf[c] == ':') currentPiece = INVALID;
+                    ACCEPT(':', 1);
+                    if (buf[c] == '\n') {
+                        ++offset_row;
+                        offset_col = 0;
+                        digits_read = 0;
+                        DECLINE_IF(offset_row > 4, "wallkicks.dat");
+                        ACCEPT('\n', 6);
+                    }
+                    if (buf[c] == '-') {
+                        negate = true;
+                        SET_STATE(6); // stay in state
+                    }
+                    if (buf[c] == ',') {
+                        negate = false; // reset
+                        ++offset_col;
+                        DECLINE_IF(offset_col > 1, "wallkicks.dat");
+                        SET_STATE(6);
+                    }
+                    if (isdigit(buf[c]) && digits_read < 2) { // accept digit
+                        // long line, but sets the wall kick data of the current piece in TData based on the parse file
+                        TData[PIECE_TO_INDEX(currentPiece)].wallkicks[start_rot][end_rot].offsets[offset_row][offset_col] = (int8_t)((negate? -1 : 1) * (buf[c] - '0'));
+                        ++digits_read;
+                        SET_STATE(6); // stay in state
+                    }
+                    DECLINE("wallkicks.dat");
+                break;
+                default: break;
+            }
+        }
+    }
+    
+    close(kckFile);
+}
+
+void parse_game_data() {
+    parse_rotations_file();
+    parse_kicks_file();
 }
 
 void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno) {
