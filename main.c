@@ -31,7 +31,7 @@ attroff(COLOR_PAIR(x));}
 typedef uint8_t ColorPair_t;
 
 // square-approximate version of the character printing functions
-#define mvaddch_sq(p1, p2, p3) (mvaddch((p1), (p2) * 2, (p3)), addch((p3)))
+#define mvaddch_sq(y, x, c) (mvaddch((y), (x) * 2, (c)), addch((c)))
 
 #define addch_sq(p1) (addch((p1)), addch((p1)))
 
@@ -56,10 +56,10 @@ enum TetrominoType_t {
     INVALID, I, J, L, S, Z, O, T
 };
 
+#define STATE_DIM 4
 // Represents a single rotation
 struct TetrominoState {
-    struct Mino state[4][4];
-    uint8_t dimx, dimy;
+    struct Mino state[STATE_DIM][STATE_DIM];
 };
 // What the piece should do if attempting to rotate into an occupied cell
 struct WallkickDef {
@@ -102,6 +102,7 @@ struct Matrix {
     bool _pieceStopped; // if the piece is currently nudging another piece
 
     enum TetrominoType_t _currentPiece;
+    uint8_t _currentRot;
 
     enum TetrominoType_t _heldPiece; // tetris holding
     bool _holdAllowable;
@@ -141,6 +142,7 @@ struct Matrix* matrix_construct() {
 
     ret->_heldPiece = INVALID;
     ret->_currentPiece = INVALID;
+    ret->_currentRot = 0;
 
     ret->_holdAllowable = true;
     ret->_pieceStopped = false;
@@ -179,6 +181,10 @@ void M_matrix_make_board(struct Matrix* instance) {
     instance->_board = (struct Mino**)calloc(instance->_nrows, sizeof(struct Mino*));
     for (minopos_t row = 0; row < instance->_nrows; row++) {
         instance->_board[row] = (struct Mino*)calloc(instance->_ncols, sizeof(struct Mino));
+        struct Mino tmp;
+        tmp.occupied = true;
+        tmp.col = GAME_COLORS.I_PIECE;
+        instance->_board[row][0] = tmp;
     }
 }
 // resize overload
@@ -189,11 +195,37 @@ void M_matrix_make_board_rs(struct Matrix* instance, minopos_t p_nrows, minopos_
     instance->_nrows = p_nrows;
     instance->_ncols = p_ncols;
 
-
-
     instance->_board = (struct Mino**)calloc(p_nrows, sizeof(struct Mino*));
     for (minopos_t row = 0; row < p_nrows; row++) {
         instance->_board[row] = (struct Mino*)calloc(p_ncols, sizeof(struct Mino));
+    }
+}
+
+void matrix_draw(struct Matrix* instance) {
+    int winx, winy;
+    getmaxyx(stdscr, winy, winx);
+    winx /= 2;
+    
+    int startx = (winx / 2) - (instance->_ncols / 2);
+    int starty = (winy / 2) - (instance->_nrows / 2);
+
+    for (int y = starty; y < instance->_nrows + starty; y++) {
+        if (y < 0 || y > winy - 3) {
+            GCOLOR(DEFAULT, mvaddstr(0, winx, "^ Make window taller! ^"));
+            GCOLOR(DEFAULT, mvaddstr(winy - 1, winx, "v Make window taller! v"));
+            continue;
+        }
+        for (int x = startx; x < instance->_ncols + startx; x++) {
+            if (x < 0 || x > winx - 3) {
+                GCOLOR(DEFAULT, mvaddstr(winy / 2, 0, "<- Make window wider! ->"));
+                continue;
+            }
+            struct Mino* mino = &instance->_board[y - starty][x - startx];
+            if (mino->occupied)
+                COLOR(mino->col, mvaddch_sq(y, x, ' '))
+            else
+                GCOLOR(DEFAULT, mvaddch_sq(y, x, ' '));
+        }
     }
 }
 
@@ -229,28 +261,35 @@ int main() {
     //     refresh();
 
     // }
-
+    struct Matrix* board = matrix_construct();
+    while (true) {
+        clear();
+        matrix_draw(board);
+        refresh();
+        usleep(16000);
+    }
+    matrix_destruct(board);
     close_main();
 
-    for (int i = 0; i < TETCOUNT; i++) {
-        for (int j = 0; j < 4; j++) {
-            for (int y = 0; y < 4; y++) {
-                for (int x = 0; x < 4; x++) {
-                    printf("%d", TData[i].rotations[j].state[y][x].occupied);
-                }
-                printf("\n");
-            }
-            printf("\n");
-        }
-        for (int starting = 0; starting < 4; starting++) {
-            for (int ending = 0; ending < 4; ending++) {
-                for (int off = 0; off < 4; off++)
-                    printf("Piece: %d, Rot: %d%d, x: %d, y: %d\n", i, starting, ending, TData[i].wallkicks[starting][ending].offsets[off][0], TData[i].wallkicks[starting][ending].offsets[off][1]);
-            }
-        }
-            printf("\n");
-    }
-    //printf("%d\n", testgetch);
+    // for (int i = 0; i < TETCOUNT; i++) {
+    //     for (int j = 0; j < 4; j++) {
+    //         for (int y = 0; y < STATE_DIM; y++) {
+    //             for (int x = 0; x < STATE_DIM; x++) {
+    //                 printf("%d", TData[i].rotations[j].state[y][x].occupied);
+    //             }
+    //             printf("\n");
+    //         }
+    //         printf("\n");
+    //     }
+    //     for (int starting = 0; starting < 4; starting++) {
+    //         for (int ending = 0; ending < 4; ending++) {
+    //             for (int off = 0; off < 4; off++)
+    //                 printf("Piece: %d, Rot: %d%d, x: %d, y: %d\n", i, starting, ending, TData[i].wallkicks[starting][ending].offsets[off][0], TData[i].wallkicks[starting][ending].offsets[off][1]);
+    //         }
+    //     }
+    //         printf("\n");
+    // }
+    // printf("%ld\n", sizeof(TData));
     return 0;
 }
 
@@ -303,7 +342,6 @@ void init_palette() {
     GAME_COLORS.T_PIECE = set_rgb_pair(SOLID(0xa7, 0x1f, 0xe0));
     GAME_COLORS.S_PIECE = set_rgb_pair(SOLID(0x46, 0xe0, 0x1f));
     GAME_COLORS.Z_PIECE = set_rgb_pair(SOLID(0xe3, 0x22, 0x22));
-
 }
 
 enum TetrominoType_t toType(char tetromino_letter) {
@@ -394,7 +432,7 @@ void parse_rotations_file() {
                     if (buf[c] == '\n') {
                         ++curY;
                         curX = 0;
-                        DECLINE_IF(curY > 4, "rotations.dat"); // out of range
+                        DECLINE_IF(curY > STATE_DIM, "rotations.dat"); // out of range
                         ACCEPT('\n', 2);
                     }
                     if (buf[c] == '>') {
@@ -409,14 +447,14 @@ void parse_rotations_file() {
                         currentState[rotCounter].state[curY][curX].col = GAME_COLORS.DEFAULT;
                         ++curX; // goes one past the last character, normally
                         SET_STATE(2);
-                        DECLINE_IF(curX > 4, "rotation.dat"); // out of range
+                        DECLINE_IF(curX > STATE_DIM, "rotation.dat"); // out of range
                     }
                     if (buf[c] == '1') {
                         currentState[rotCounter].state[curY][curX].occupied = true;
                         currentState[rotCounter].state[curY][curX].col = toPieceColor(currentPiece);
                         ++curX; // goes one past the last character normally
                         SET_STATE(2);
-                        DECLINE_IF(curX > 4, "rotation.dat"); // out of range
+                        DECLINE_IF(curX > STATE_DIM, "rotation.dat"); // out of range
                     }
                 break;
                 default: break;
