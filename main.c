@@ -41,7 +41,7 @@ typedef uint8_t ColorPair_t;
 
 // STRUCTS -------------------------------------------
 struct ColorSet {
-    ColorPair_t DEFAULT;
+    ColorPair_t DEFAULT, BG;
     ColorPair_t I_PIECE, J_PIECE, L_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE;
 } GAME_COLORS;
 #define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt)) // version that aliases colors stored within the global struct
@@ -163,75 +163,120 @@ struct Matrix* matrix_construct() {
     return ret;
 }
 
-void M_matrix_destroy_board(struct Matrix* instance) {
-    if (instance->_board == NULL) return;
+void M_matrix_destroy_board(struct Matrix* this) {
+    if (this->_board == NULL) return;
 
-    for (minopos_t row = 0; row < instance->_nrows; row++) {
-        free(instance->_board[row]);
+    for (minopos_t row = 0; row < this->_nrows; row++) {
+        free(this->_board[row]);
     }
-    free(instance->_board);
-    instance->_board = NULL;
+    free(this->_board);
+    this->_board = NULL;
 }
 
-void M_matrix_make_board(struct Matrix* instance) {
-    if (instance->_board != NULL) {
-        M_matrix_destroy_board(instance);
+void M_matrix_make_board(struct Matrix* this) {
+    if (this->_board != NULL) {
+        M_matrix_destroy_board(this);
     }
 
-    instance->_board = (struct Mino**)calloc(instance->_nrows, sizeof(struct Mino*));
-    for (minopos_t row = 0; row < instance->_nrows; row++) {
-        instance->_board[row] = (struct Mino*)calloc(instance->_ncols, sizeof(struct Mino));
-        struct Mino tmp;
-        tmp.occupied = true;
-        tmp.col = GAME_COLORS.I_PIECE;
-        instance->_board[row][0] = tmp;
+    this->_board = (struct Mino**)calloc(this->_nrows, sizeof(struct Mino*));
+    for (minopos_t row = 0; row < this->_nrows; row++) {
+        this->_board[row] = (struct Mino*)calloc(this->_ncols, sizeof(struct Mino));
     }
 }
 // resize overload
-void M_matrix_make_board_rs(struct Matrix* instance, minopos_t p_nrows, minopos_t p_ncols) {
-    if (instance->_board != NULL) {
-        M_matrix_destroy_board(instance);
+void M_matrix_make_board_rs(struct Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
+    if (this->_board != NULL) {
+        M_matrix_destroy_board(this);
     }
-    instance->_nrows = p_nrows;
-    instance->_ncols = p_ncols;
+    this->_nrows = p_nrows;
+    this->_ncols = p_ncols;
 
-    instance->_board = (struct Mino**)calloc(p_nrows, sizeof(struct Mino*));
+    this->_board = (struct Mino**)calloc(p_nrows, sizeof(struct Mino*));
     for (minopos_t row = 0; row < p_nrows; row++) {
-        instance->_board[row] = (struct Mino*)calloc(p_ncols, sizeof(struct Mino));
+        this->_board[row] = (struct Mino*)calloc(p_ncols, sizeof(struct Mino));
     }
 }
 
-void matrix_draw(struct Matrix* instance) {
+ColorPair_t toPieceColor(enum TetrominoType_t piece);
+
+// pastes the current tetromino into the matrix
+bool M_matrix_paste_tet(struct Matrix* this) {
+    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
+
+    // at least one dim is out of bounds
+    bool OOBflag = false;
+    for (minopos_t y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) OOBflag = true;
+
+        for (minopos_t x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+            if (x < 0 || x >= this->_ncols) OOBflag = true;
+
+            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
+            struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
+            if (currentCell->occupied && OOBflag) return false; // piece failed to paste due to OOB
+            if (OOBflag) { // cell is not relevant
+                OOBflag = false;
+                continue;
+            }
+            if (this->_board[y][x].occupied && currentCell->occupied) return false; // piece failed due to occupied position
+            this->_board[y][x] = *currentCell; // no checks failed, add to board
+        }
+        
+    }
+    return true;
+}
+
+void M_matrix_unpaste_tet(struct Matrix* this) {
+    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
+
+    for (minopos_t y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) continue;;
+
+        for (minopos_t x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+            if (x < 0 || x >= this->_ncols) continue;
+            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
+            struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
+            if (currentCell->occupied) {
+                this->_board[y][x].occupied = false; // remove mino
+                this->_board[y][x].col = GAME_COLORS.DEFAULT;
+            }
+
+        }
+        
+    }
+}
+
+void matrix_draw(struct Matrix* this) {
     int winx, winy;
     getmaxyx(stdscr, winy, winx);
     winx /= 2;
     
-    int startx = (winx / 2) - (instance->_ncols / 2);
-    int starty = (winy / 2) - (instance->_nrows / 2);
+    int startx = (winx / 2) - (this->_ncols / 2);
+    int starty = (winy / 2) - (this->_nrows / 2);
 
-    for (int y = starty; y < instance->_nrows + starty; y++) {
+    for (int y = starty; y < this->_nrows + starty; y++) {
         if (y < 0 || y > winy - 3) {
             GCOLOR(DEFAULT, mvaddstr(0, winx, "^ Make window taller! ^"));
             GCOLOR(DEFAULT, mvaddstr(winy - 1, winx, "v Make window taller! v"));
             continue;
         }
-        for (int x = startx; x < instance->_ncols + startx; x++) {
+        for (int x = startx; x < this->_ncols + startx; x++) {
             if (x < 0 || x > winx - 3) {
                 GCOLOR(DEFAULT, mvaddstr(winy / 2, 0, "<- Make window wider! ->"));
                 continue;
             }
-            struct Mino* mino = &instance->_board[y - starty][x - startx];
+            struct Mino* mino = &this->_board[y - starty][x - startx];
             if (mino->occupied)
                 COLOR(mino->col, mvaddch_sq(y, x, ' '))
             else
-                GCOLOR(DEFAULT, mvaddch_sq(y, x, ' '));
+                GCOLOR(BG, mvaddch_sq(y, x, ' '));
         }
     }
 }
 
-void matrix_destruct(struct Matrix* instance) {
-    M_matrix_destroy_board(instance);
-    free(instance);
+void matrix_destruct(struct Matrix* this) {
+    M_matrix_destroy_board(this);
+    free(this);
 }
 // end member functs --
 
@@ -239,9 +284,13 @@ void matrix_destruct(struct Matrix* instance) {
 
 
 int main() {
+
+
     init_main();
     init_palette();
-
+    parse_game_data();
+    struct Matrix* mat = matrix_construct();
+    mat->_currentPiece = T;
     // int testgetch = 0;
 
     // move_sq(0, 0);
@@ -261,21 +310,34 @@ int main() {
     //     refresh();
 
     // }
-    struct Matrix* board = matrix_construct();
     while (true) {
-        clear();
-        matrix_draw(board);
+
+        M_matrix_paste_tet(mat);
+        int scry, scrx;
+
+        getmaxyx(stdscr, scry, scrx);
+        for (int y = 0; y < scry; y++) {
+            for (int x = 0; x < scrx; x++) {
+                GCOLOR(DEFAULT, mvaddch(y, x, ' ')); // clear() doesn't work how I want it to
+            }
+        }
+        matrix_draw(mat);
         refresh();
-        usleep(16000);
+
+        M_matrix_unpaste_tet(mat);
+        ++mat->_currentRot;
+        mat->_currentRot = mat->_currentRot % 4;
+
+        usleep(160000);
     }
-    matrix_destruct(board);
+    matrix_destruct(mat);
     close_main();
 
     // for (int i = 0; i < TETCOUNT; i++) {
     //     for (int j = 0; j < 4; j++) {
     //         for (int y = 0; y < STATE_DIM; y++) {
     //             for (int x = 0; x < STATE_DIM; x++) {
-    //                 printf("%d", TData[i].rotations[j].state[y][x].occupied);
+    //                 printf("%d, C: %d ", TData[i].rotations[j].state[y][x].occupied, TData[i].rotations[j].state[y][x].col);
     //             }
     //             printf("\n");
     //         }
@@ -315,7 +377,6 @@ uint8_t set_rgb_pair(uint8_t fr, uint8_t fb, uint8_t fg, uint8_t br, uint8_t bg,
 }
 
 void init_main() {
-    parse_game_data();
     initscr();
     start_color();
     if (!can_change_color()) {
@@ -335,6 +396,7 @@ void close_main() {
 }
 
 void init_palette() {
+    GAME_COLORS.DEFAULT = set_rgb_pair(0xff, 0xff, 0xff, 0, 0, 0);
     GAME_COLORS.I_PIECE = set_rgb_pair(SOLID(0x42, 0xe6, 0xf5));
     GAME_COLORS.J_PIECE = set_rgb_pair(SOLID(0x35, 0x38, 0xcc));
     GAME_COLORS.L_PIECE = set_rgb_pair(SOLID(0xe8, 0xcf, 0x4f));
@@ -342,6 +404,7 @@ void init_palette() {
     GAME_COLORS.T_PIECE = set_rgb_pair(SOLID(0xa7, 0x1f, 0xe0));
     GAME_COLORS.S_PIECE = set_rgb_pair(SOLID(0x46, 0xe0, 0x1f));
     GAME_COLORS.Z_PIECE = set_rgb_pair(SOLID(0xe3, 0x22, 0x22));
+    GAME_COLORS.BG = set_rgb_pair(SOLID(0x22, 0x22, 0x22));
 }
 
 enum TetrominoType_t toType(char tetromino_letter) {
@@ -441,17 +504,17 @@ void parse_rotations_file() {
                         SET_STATE(2);
                     }
                     DECLINE_IF(!(buf[c] == '0' || buf[c] == '1'), "rotation.dat");
-                    struct TetrominoState* currentState = TData[PIECE_TO_INDEX(currentPiece)].rotations;
+                    struct TetrominoState* currentRots = TData[PIECE_TO_INDEX(currentPiece)].rotations;
                     if (buf[c] == '0') {
-                        currentState[rotCounter].state[curY][curX].occupied = false;
-                        currentState[rotCounter].state[curY][curX].col = GAME_COLORS.DEFAULT;
+                        currentRots[rotCounter].state[curY][curX].occupied = false;
+                        currentRots[rotCounter].state[curY][curX].col = GAME_COLORS.DEFAULT;
                         ++curX; // goes one past the last character, normally
                         SET_STATE(2);
                         DECLINE_IF(curX > STATE_DIM, "rotation.dat"); // out of range
                     }
                     if (buf[c] == '1') {
-                        currentState[rotCounter].state[curY][curX].occupied = true;
-                        currentState[rotCounter].state[curY][curX].col = toPieceColor(currentPiece);
+                        currentRots[rotCounter].state[curY][curX].occupied = true;
+                        currentRots[rotCounter].state[curY][curX].col = toPieceColor(currentPiece);
                         ++curX; // goes one past the last character normally
                         SET_STATE(2);
                         DECLINE_IF(curX > STATE_DIM, "rotation.dat"); // out of range
