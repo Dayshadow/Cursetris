@@ -4,6 +4,8 @@
 #include <math.h>
 #include <sys/fcntl.h>
 #include <ctype.h>
+#include <termios.h>
+#include <signal.h>
 
 // DEFINES ----------------------------------------
 #define COLOR(x, stmt) {attron(COLOR_PAIR(x)); \
@@ -72,6 +74,7 @@ struct TetrominoDef {
 };
 
 #define PIECE_TO_INDEX(type) ((int)(type) - 1) // enum hack
+#define INDEX_TO_PIECE(type) ((enum TetrominoType_t)(type) + 1) // enum hack
 struct TetrominoDef TData[TETCOUNT] = {0};
 
 
@@ -156,10 +159,10 @@ Matrix* matrix_construct() {
     ret->_hdropY = 0;
 
     ret->_updateFrameCounter = 0;
-    ret->_updateFrameDelay = 40;
+    ret->_updateFrameDelay = 10;
 
     ret->_lockCounter = 0;
-    ret->_lockDelay = 60;
+    ret->_lockDelay = 5;
 
     ret->_gravity = 1;
     ret->_linesCleared = 0;
@@ -235,7 +238,8 @@ bool M_matrix_paste_tet(Matrix* this) {
         for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
             if (x < 0 || x >= this->_ncols) continue;
             struct Mino* currentCell = &TData[PIECE_TO_INDEX(this->_currentPiece)].rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
-            this->_board[y][x] = *currentCell; // no checks failed, add to board
+            if (currentCell->occupied)
+                this->_board[y][x] = *currentCell; // no checks failed, add to board
         }
     }
 
@@ -266,6 +270,34 @@ void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t r
     this->_currentPiece = kind;
     this->_currentRot = rot_index % 4;
     this->_currentPieceData = &TData[PIECE_TO_INDEX(kind)];
+}
+
+
+// 7bag tetris
+static bool bag[TETCOUNT] = {0};
+static uint16_t picked_count = 0;
+enum TetrominoType_t bag_pick() {
+    if (picked_count == TETCOUNT) { // reset bag
+        for (uint16_t i = 0; i < TETCOUNT; i++) bag[i] = false;
+        picked_count = 0;
+    }
+    uint16_t chosen;
+    while (true) {
+        chosen = (uint16_t)(rand() % TETCOUNT);
+        if (bag[chosen]) continue;
+        picked_count++;
+        bag[chosen] = true;
+        return INDEX_TO_PIECE(chosen);
+        break;
+    }
+}
+
+bool matrix_respawn_tet(Matrix* this) {
+    matrix_set_current_piece(this, bag_pick(), 0);
+    this->_tetX = this->_rootX;
+    this->_tetY = this->_rootY;
+
+    return M_matrix_paste_tet(this);
 }
 
 // assume tet is already unpasted, to handle all pasting
@@ -345,6 +377,21 @@ bool matrix_apply_gravity(Matrix* this) {
     return true;
 }
 
+void matrix_update(Matrix* this) {
+    this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
+    if (this->_updateFrameCounter == 0) {
+        if (this->_lockCounter > this->_lockDelay) {
+            if (matrix_apply_gravity(this)) this->_lockCounter -= 1; // quick fix
+            this->_lockCounter = 0;
+            matrix_respawn_tet(this);
+        }
+        if (!matrix_apply_gravity(this)) {
+            this->_lockCounter++;
+        }
+    }
+
+}
+
 void matrix_draw(Matrix* this) {
     int winx, winy;
     getmaxyx(stdscr, winy, winx);
@@ -381,7 +428,7 @@ void matrix_destruct(Matrix* this) {
 
 // END FUNCS ----------------------------------------
 
-
+static bool running_flag = true;
 int main() {
 
 
@@ -389,13 +436,11 @@ int main() {
     init_palette();
     parse_game_data();
     Matrix* mat = matrix_construct();
-    int testgetch = 0;
 
-    matrix_set_current_piece(mat, I, 1);
+    matrix_respawn_tet(mat);
 
-    while (true) {
-        testgetch = getch();
-        M_matrix_paste_tet(mat);
+    int c = 0;
+    while (running_flag) {
         int scry, scrx;
 
         getmaxyx(stdscr, scry, scrx);
@@ -405,7 +450,7 @@ int main() {
             }
         }
 
-        switch (testgetch) {
+        switch (c) {
             case 'w':
                 matrix_rotate_piece(mat, 1);
             break;
@@ -419,33 +464,16 @@ int main() {
                 matrix_slide_piece(mat, 1);
             break;
         }
+        matrix_update(mat);
         matrix_draw(mat);
         refresh();
+
+        c = getch();
 
         usleep(16000);
     }
     matrix_destruct(mat);
     close_main();
-
-    // for (int i = 0; i < TETCOUNT; i++) {
-    //     for (int j = 0; j < 4; j++) {
-    //         for (int y = 0; y < STATE_DIM; y++) {
-    //             for (int x = 0; x < STATE_DIM; x++) {
-    //                 printf("%d, C: %d ", TData[i].rotations[j].state[y][x].occupied, TData[i].rotations[j].state[y][x].col);
-    //             }
-    //             printf("\n");
-    //         }
-    //         printf("\n");
-    //     }
-    //     for (int starting = 0; starting < 4; starting++) {
-    //         for (int ending = 0; ending < 4; ending++) {
-    //             for (int off = 0; off < 4; off++)
-    //                 printf("Piece: %d, Rot: %d%d, x: %d, y: %d\n", i, starting, ending, TData[i].wallkicks[starting][ending].offsets[off][0], TData[i].wallkicks[starting][ending].offsets[off][1]);
-    //         }
-    //     }
-    //         printf("\n");
-    // }
-    // printf("%ld\n", sizeof(TData));
     return 0;
 }
 
@@ -470,6 +498,9 @@ uint8_t set_rgb_pair(uint8_t fr, uint8_t fb, uint8_t fg, uint8_t br, uint8_t bg,
     return S_palette_back - 1;
 }
 
+void stop_game() {
+    running_flag = false;
+}
 void init_main() {
     initscr();
     start_color();
@@ -482,10 +513,12 @@ void init_main() {
     clear();
     curs_set(0);
     noecho();
+    signal(SIGINT, stop_game);
+    cbreak();
+    nodelay(stdscr, true);
 }
 
 void close_main() {
-    getch();
     endwin();
 }
 
