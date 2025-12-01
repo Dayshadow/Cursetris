@@ -76,10 +76,10 @@ struct TetrominoDef TData[TETCOUNT] = {0};
 
 
 // unit for game board positions
-typedef uint16_t minopos_t;
+typedef int16_t minopos_t;
 
 // The game board, handles most of game state
-struct Matrix {
+struct Matrix_s {
     minopos_t _nrows;
     minopos_t _ncols;
 
@@ -102,16 +102,19 @@ struct Matrix {
     bool _pieceStopped; // if the piece is currently nudging another piece
 
     enum TetrominoType_t _currentPiece;
+    struct TetrominoDef* _currentPieceData; // should be updated at the same time as the piece
     uint8_t _currentRot;
 
     enum TetrominoType_t _heldPiece; // tetris holding
     bool _holdAllowable;
 
+    uint16_t _gravity; // amount to fall each step, only matters once the update counter is at its fastest
     size_t _linesCleared;
 
     // actual game data
     struct Mino** _board;
 };
+typedef struct Matrix_s Matrix;
 // END STRUCTS ---------------------------------------
 
 // FUNCTS --------------------------------------------
@@ -126,11 +129,11 @@ void parse_game_data();
 // member functs ------
 
 // create piece data
-void M_matrix_make_board(struct Matrix*);
+void M_matrix_make_board(Matrix*);
 
 // initialize class
-struct Matrix* matrix_construct() {
-    struct Matrix* ret = (struct Matrix*)calloc(1, sizeof(struct Matrix));
+Matrix* matrix_construct() {
+    Matrix* ret = (Matrix*)calloc(1, sizeof(Matrix));
     ret->_ncols = 10; // these could be #defines, but I feel like making it adjustable
     ret->_nrows = 24;
 
@@ -142,6 +145,8 @@ struct Matrix* matrix_construct() {
 
     ret->_heldPiece = INVALID;
     ret->_currentPiece = INVALID;
+    ret->_currentPieceData = NULL;
+
     ret->_currentRot = 0;
 
     ret->_holdAllowable = true;
@@ -156,6 +161,7 @@ struct Matrix* matrix_construct() {
     ret->_lockCounter = 0;
     ret->_lockDelay = 60;
 
+    ret->_gravity = 1;
     ret->_linesCleared = 0;
 
     ret->_board = NULL;
@@ -163,7 +169,7 @@ struct Matrix* matrix_construct() {
     return ret;
 }
 
-void M_matrix_destroy_board(struct Matrix* this) {
+void M_matrix_destroy_board(Matrix* this) {
     if (this->_board == NULL) return;
 
     for (minopos_t row = 0; row < this->_nrows; row++) {
@@ -173,66 +179,76 @@ void M_matrix_destroy_board(struct Matrix* this) {
     this->_board = NULL;
 }
 
-void M_matrix_make_board(struct Matrix* this) {
+void M_matrix_make_board(Matrix* this) {
     if (this->_board != NULL) {
         M_matrix_destroy_board(this);
     }
 
-    this->_board = (struct Mino**)calloc(this->_nrows, sizeof(struct Mino*));
+    this->_board = (struct Mino**)calloc((size_t)this->_nrows, sizeof(struct Mino*));
     for (minopos_t row = 0; row < this->_nrows; row++) {
-        this->_board[row] = (struct Mino*)calloc(this->_ncols, sizeof(struct Mino));
+        this->_board[row] = (struct Mino*)calloc((size_t)this->_ncols, sizeof(struct Mino));
     }
 }
 // resize overload
-void M_matrix_make_board_rs(struct Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
+void M_matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
     if (this->_board != NULL) {
         M_matrix_destroy_board(this);
     }
+    if (p_ncols < 1 || p_nrows < 1) FAIL("Invalid board size, negative or zero.\n");
     this->_nrows = p_nrows;
     this->_ncols = p_ncols;
 
-    this->_board = (struct Mino**)calloc(p_nrows, sizeof(struct Mino*));
+    this->_board = (struct Mino**)calloc((size_t)p_nrows, sizeof(struct Mino*));
     for (minopos_t row = 0; row < p_nrows; row++) {
-        this->_board[row] = (struct Mino*)calloc(p_ncols, sizeof(struct Mino));
+        this->_board[row] = (struct Mino*)calloc((size_t)p_ncols, sizeof(struct Mino));
     }
 }
 
 ColorPair_t toPieceColor(enum TetrominoType_t piece);
 
 // pastes the current tetromino into the matrix
-bool M_matrix_paste_tet(struct Matrix* this) {
+bool M_matrix_paste_tet(Matrix* this) {
     if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
 
     // at least one dim is out of bounds
-    bool OOBflag = false;
+    bool OOBXflag = false;
+    bool OOBYflag = false;
     for (minopos_t y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
-        if (y < 0 || y >= this->_nrows) OOBflag = true;
+        if (y < 0 || y >= this->_nrows) OOBYflag = true;
 
         for (minopos_t x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
-            if (x < 0 || x >= this->_ncols) OOBflag = true;
+            if (x < 0 || x >= this->_ncols) OOBXflag = true;
 
             struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
             struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
-            if (currentCell->occupied && OOBflag) return false; // piece failed to paste due to OOB
-            if (OOBflag) { // cell is not relevant
-                OOBflag = false;
-                continue;
+            if (currentCell->occupied) {
+                if (OOBXflag || OOBYflag) return false; // piece failed to paste due to OOB
+                if (this->_board[y][x].occupied) return false; // piece failed due to occupied position
             }
-            if (this->_board[y][x].occupied && currentCell->occupied) return false; // piece failed due to occupied position
+            OOBXflag = false;
+        }
+        OOBYflag = false;
+    }
+
+    for (int y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) continue;
+        for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+            if (x < 0 || x >= this->_ncols) continue;
+            struct Mino* currentCell = &TData[PIECE_TO_INDEX(this->_currentPiece)].rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
             this->_board[y][x] = *currentCell; // no checks failed, add to board
         }
-        
     }
+
     return true;
 }
 
-void M_matrix_unpaste_tet(struct Matrix* this) {
-    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
+void M_matrix_unpaste_tet(Matrix* this) {
+    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to unpaste an empty piece.\n");
 
-    for (minopos_t y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
-        if (y < 0 || y >= this->_nrows) continue;;
+    for (int y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) continue;
 
-        for (minopos_t x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+        for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
             if (x < 0 || x >= this->_ncols) continue;
             struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
             struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
@@ -246,7 +262,90 @@ void M_matrix_unpaste_tet(struct Matrix* this) {
     }
 }
 
-void matrix_draw(struct Matrix* this) {
+void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t rot_index) {
+    this->_currentPiece = kind;
+    this->_currentRot = rot_index % 4;
+    this->_currentPieceData = &TData[PIECE_TO_INDEX(kind)];
+}
+
+// assume tet is already unpasted, to handle all pasting
+bool M_matrix_wallkick_test(Matrix* this, uint8_t start_rot, uint8_t end_rot) {
+    int startX = (int)this->_tetX;
+    int startY = (int)this->_tetY;
+
+    // retrieve kick data for current inital-final rotation states
+    struct WallkickDef* kickSubject = &this->_currentPieceData->wallkicks[start_rot][end_rot];
+
+    // go through each offset one by one, checking each xy pair
+    for (uint8_t kick_index = 0; kick_index < 4; kick_index++) {
+        int offX = startX + kickSubject->offsets[kick_index][0];
+        int offY = startY - kickSubject->offsets[kick_index][1];
+        if (offX < 0 || offX >= this->_ncols) continue;
+        if (offY < 0 || offY >= this->_nrows) continue;
+        this->_tetX = (minopos_t)offX;
+        this->_tetY = (minopos_t)offY;
+        if (M_matrix_paste_tet(this)) return true;
+    }
+    this->_tetX = (minopos_t)startX;
+    this->_tetY = (minopos_t)startY;
+    return false;
+}
+
+// assume pasted, dir = -1 for ccw, dir = 1 for cw
+bool matrix_rotate_piece(Matrix* this, int8_t dir) {
+    M_matrix_unpaste_tet(this);
+    // clamp range
+    if (dir > -1) dir = 1;
+    if (dir < 0) dir = -1;
+
+    uint8_t start_rot = this->_currentRot;
+    // loop rotation with modulo
+    this->_currentRot = (uint8_t)((uint8_t)(this->_currentRot + 4u) + dir) % 4u;
+    uint8_t end_rot = this->_currentRot;
+
+    if (M_matrix_paste_tet(this)) {
+        // success, no need to do any kicks
+        return true;
+    } else {
+        // fail, attempt to shift the piece around
+        bool attempt = M_matrix_wallkick_test(this, start_rot, end_rot);
+        if (!attempt) { // failed to wallkick
+            this->_currentRot = start_rot;
+            M_matrix_paste_tet(this);
+        } else
+            return true;
+    }
+
+    return false;
+}
+
+bool matrix_slide_piece(Matrix* this, int8_t shift) {
+    M_matrix_unpaste_tet(this);
+    this->_tetX += (minopos_t)shift;
+    if (M_matrix_paste_tet(this)) {
+        return true;
+    } else {
+        this->_tetX -= (minopos_t)shift;
+        M_matrix_paste_tet(this);
+        return false;
+    }
+}
+
+bool matrix_apply_gravity(Matrix* this) {
+    // attempt to move down, true if succeed, false if stuck
+    for (uint16_t step = 0; step < this->_gravity; step++) {
+        M_matrix_unpaste_tet(this);
+        this->_tetY++;
+        if (!M_matrix_paste_tet(this)) {
+            this->_tetY--;
+            M_matrix_paste_tet(this);
+            return false;
+        }
+    }
+    return true;
+}
+
+void matrix_draw(Matrix* this) {
     int winx, winy;
     getmaxyx(stdscr, winy, winx);
     winx /= 2;
@@ -274,7 +373,7 @@ void matrix_draw(struct Matrix* this) {
     }
 }
 
-void matrix_destruct(struct Matrix* this) {
+void matrix_destruct(Matrix* this) {
     M_matrix_destroy_board(this);
     free(this);
 }
@@ -289,29 +388,13 @@ int main() {
     init_main();
     init_palette();
     parse_game_data();
-    struct Matrix* mat = matrix_construct();
-    mat->_currentPiece = T;
-    // int testgetch = 0;
+    Matrix* mat = matrix_construct();
+    int testgetch = 0;
 
-    // move_sq(0, 0);
+    matrix_set_current_piece(mat, I, 1);
 
-    // while (true) {
-    //     //GCOLOR(I_PIECE, addch_sq(' '));
-
-    //     testgetch = getch();
-    //     switch (testgetch) {
-    //         case 'l':
-    //         GCOLOR(I_PIECE, addch_sq('>'));
-    //         break;
-    //         case 'j':
-    //         GCOLOR(O_PIECE, addch_sq('<'));
-    //         break;
-    //     }
-    //     refresh();
-
-    // }
     while (true) {
-
+        testgetch = getch();
         M_matrix_paste_tet(mat);
         int scry, scrx;
 
@@ -321,14 +404,25 @@ int main() {
                 GCOLOR(DEFAULT, mvaddch(y, x, ' ')); // clear() doesn't work how I want it to
             }
         }
+
+        switch (testgetch) {
+            case 'w':
+                matrix_rotate_piece(mat, 1);
+            break;
+            case 's':
+                matrix_apply_gravity(mat);
+            break;
+            case 'a':
+                matrix_slide_piece(mat, -1);
+            break;
+            case 'd':
+                matrix_slide_piece(mat, 1);
+            break;
+        }
         matrix_draw(mat);
         refresh();
 
-        M_matrix_unpaste_tet(mat);
-        ++mat->_currentRot;
-        mat->_currentRot = mat->_currentRot % 4;
-
-        usleep(160000);
+        usleep(16000);
     }
     matrix_destruct(mat);
     close_main();
