@@ -44,7 +44,7 @@ typedef uint8_t ColorPair_t;
 
 // STRUCTS -------------------------------------------
 struct ColorSet {
-    ColorPair_t DEFAULT, BG, SPAWN_ZONE, GHOST, GOLDEN, METEOR, METEOR2;
+    ColorPair_t DEFAULT, DEFAULT_INV, BG, SPAWN_ZONE, GHOST, GOLDEN, METEOR, METEOR2;
     ColorPair_t I_PIECE, J_PIECE, L_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE;
 } GAME_COLORS;
 #define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt)) // version that aliases colors stored within the global struct
@@ -152,6 +152,7 @@ struct Matrix_s {
     bool _holdAllowable;
 
     uint16_t _gravity; // amount to fall each step, only matters once the update counter is at its fastest
+    uint32_t _level;
     size_t _linesCleared;
     size_t _points;
     size_t _lastPoints;
@@ -178,20 +179,21 @@ enum TetrominoType_t toType(char tetromino_letter);
 void parse_kicks_file();
 void parse_rotations_file();
 void parse_game_data();
+void draw_meteors(size_t itr);
 ColorPair_t toPieceColor(enum TetrominoType_t piece);
 // member functs ------
 
 // private
 void M_matrix_make_board(Matrix*);
 void M_matrix_destroy_board(Matrix*);
-void M_matrix_make_board_rs(Matrix*, minopos_t, minopos_t);
+void matrix_make_board_rs(Matrix*, minopos_t, minopos_t);
 bool M_matrix_test_tet(Matrix*);
 bool M_matrix_paste_tet(Matrix*);
 void M_matrix_unpaste_tet(Matrix*);
 void M_matrix_set_hdrop_pos(Matrix*);
 bool M_matrix_test_if_stuck(Matrix*);
 bool M_matrix_lock(Matrix*);
-void M_matrix_hdrop(Matrix*);
+bool M_matrix_hdrop(Matrix*);
 bool M_matrix_wallkick(Matrix*, uint8_t, uint8_t);
 enum ComboType_t M_matrix_check_combo_type(Matrix*, bool, uint16_t, enum TetrominoType_t);
 size_t M_matrix_add_score(Matrix* this, enum ComboType_t current_combo);
@@ -208,26 +210,29 @@ bool matrix_slide_piece(Matrix*, int8_t);
 uint16_t matrix_test_lines(Matrix*);
 bool matrix_apply_gravity(Matrix*);
 bool matrix_hold_piece(Matrix*);
-void matrix_update(Matrix*);
+bool matrix_update(Matrix*);
 void matrix_draw(Matrix*);
 void matrix_death(Matrix*);
 
 // end member functs --
-
 // END FUNCS ----------------------------------------
 
 static bool running_flag = true;
+static bool menu_state = true;
+static size_t highscore = 0;
+static size_t highlines = 0;
 int main() {
 
     init_main();
     init_palette();
     parse_game_data();
-    Matrix* mat = matrix_construct();
+    Matrix* mat = NULL;
 
-    matrix_respawn_tet_random(mat);
-    int meteors[16] = {rand(), rand(), rand(), rand(), rand(), rand(),rand(), rand(), rand(), rand(), rand(), rand(), rand(), rand(),rand(), rand()};
+    int nrows = 24;
+    int ncols = 10;
+    uint8_t selected_idx = 0;
+    int* opt_value = NULL;
 
-    
     int c = 0;
     size_t itr = 0;
     while (running_flag) {
@@ -237,34 +242,108 @@ int main() {
         getmaxyx(stdscr, scry, scrx);
         for (int y = 0; y < scry; y++) {
             for (int x = 0; x < scrx; x++) {
-                //GCOLOR(DEFAULT, mvaddch(y, x, ' ')); // clear() doesn't work how I want it to
-                if (rand() % 20 == 0) {
+                if (rand() % 50 == 0) {
                     GCOLOR(DEFAULT, mvaddch(y, x, ' '));
                 }
             }
         }
+        
+        draw_meteors(itr);
 
-        for (int j = 0; j < ELMCOUNT(meteors) / 2; j++) {
-            int* mx = &meteors[2 * j];
-            int* my = &meteors[2 * j + 1];
-            if (itr % 4 == 0) {
-                *mx += (j % 3 == 0? 1 : -1) * (j % 2 + 1);
-                *my += 1 + (rand() % 10 == 0? 1 : 0);
-                if (*mx > scrx) {
-                    *mx = 0;
-                    *my = rand() % scry;
-                } 
-                if (*mx < 0) *mx = scrx; 
-                if (*my > scry) {
-                    *my = 0;
-                    *mx = rand() % scrx;
+        if (menu_state) {
+
+            GCOLOR(DEFAULT, mvaddstr(1, 1, "Basic Controls:"));
+            GCOLOR(DEFAULT, mvaddstr(2, 1, " - Menu Nav: J/L"));
+            GCOLOR(DEFAULT, mvaddstr(3, 1, " - Option Select: I/K"));
+            GCOLOR(DEFAULT, mvaddstr(4, 1, " - Select: Space"));
+            GCOLOR(DEFAULT, mvaddstr(6, 1, "Tip: Change your OS keyboard settings to set repeat delay to its shortest value."));
+
+            char row_str[32] = {0};
+            char col_str[32] = {0};
+            snprintf(col_str, 31, "Board Width: %d ", ncols);
+            snprintf(row_str, 31, "Board Height: %d ", nrows);
+
+            char highscore_str[64] = {0};
+            char highlines_str[64] = {0};
+            snprintf(highscore_str, 31, "Highscore: %ld ", highscore);
+            snprintf(highlines_str, 31, "Highest Line Count: %ld ", highlines);
+
+            GCOLOR(DEFAULT, draw_text_centered(scrx / 2, 1, highscore_str));
+            GCOLOR(DEFAULT, draw_text_centered(scrx / 2, 2, highlines_str));
+
+            #define OPTCOUNT 4
+            char* opts[OPTCOUNT] = {
+                "Start Game",
+                col_str,
+                row_str,
+                "Exit"
+            };
+
+            switch (tolower(c)) {
+                case 'l':
+                    selected_idx = (uint8_t)((selected_idx + 1) % OPTCOUNT);
+                    if (selected_idx == 0) opt_value = NULL;
+                    if (selected_idx == 1) opt_value = &ncols;
+                    if (selected_idx == 2) opt_value = &nrows;
+                break;
+                case 'j':
+                    selected_idx = (uint8_t)((selected_idx + OPTCOUNT - 1) % OPTCOUNT);
+                    if (selected_idx == 0) opt_value = NULL;
+                    if (selected_idx == 1) opt_value = &ncols;
+                    if (selected_idx == 2) opt_value = &nrows;
+                break;
+                case ' ':
+                    if (selected_idx == 0) {
+                        menu_state = false; 
+                        mat = matrix_construct();
+                        matrix_make_board_rs(mat, (minopos_t)nrows, (minopos_t)ncols);
+                        if (mat->_ncols != 10) {
+                            mat->_rootX = mat->_ncols / 2 - STATE_DIM / 2;
+                        }
+                        matrix_respawn_tet_random(mat);
+                    }
+                    if (selected_idx == 3) {
+                        close_main();
+                        return 0;
+                    }
+                break;
+                case 'i':
+                    if (opt_value != NULL && *opt_value < 255) {
+                        *opt_value += 1;
+                    }
+                break;
+                case 'k':
+                    if (opt_value != NULL && *opt_value > 4) {
+                        *opt_value -= 1;
+                    }
+                break;
+                default: break;
+            }
+
+            for (int i = 0; i < ELMCOUNT(opts); i++) {
+                if (i == selected_idx) {
+                    GCOLOR(DEFAULT_INV, draw_text_centered(scrx / 2, scry / 2 - 3 + i, opts[i]));
+                } else {
+                    GCOLOR(DEFAULT, draw_text_centered(scrx / 2, scry / 2 - 3 + i, opts[i]));
                 }
             }
-            circ_set((chtype)*mx, (chtype)*my, (chtype)7, ' ', GAME_COLORS.METEOR, GAME_COLORS.METEOR2);
+            c = getch();
+            refresh();
+            usleep(16000);
 
-        }
+            continue;
+        } 
 
-        switch (c) {
+        // game state
+        GCOLOR(DEFAULT, mvaddstr(1, 1, "Basic Controls:"));
+        GCOLOR(DEFAULT, mvaddstr(2, 1, " - Left/Right: J/L"));
+        GCOLOR(DEFAULT, mvaddstr(3, 1, " - Rotate CW: I or X"));
+        GCOLOR(DEFAULT, mvaddstr(4, 1, " - Rotate CCW: Z"));
+        GCOLOR(DEFAULT, mvaddstr(5, 1, " - Hold Piece: C"));
+        GCOLOR(DEFAULT, mvaddstr(6, 1, " - Hard Drop: Space"));
+                    
+
+        switch (tolower(c)) {
             case 'x': case 'i':
                 matrix_rotate_piece(mat, 1);
             break;
@@ -284,16 +363,26 @@ int main() {
                 matrix_hdrop(mat);
             break;
             case 'c':
-                if (!matrix_hold_piece(mat)) matrix_death(mat);
+                if (!matrix_hold_piece(mat)) {
+                    matrix_death(mat);
+                    mat = NULL;
+                    c = 0;
+                    continue;
+                }
             break;
         }
-        matrix_update(mat);
+        if (!matrix_update(mat)) {
+            matrix_death(mat);
+            mat = NULL;
+            c = 0;
+            continue;
+        };
         matrix_draw(mat);
         refresh();
 
         c = getch();
 
-        usleep(10000);
+        usleep(16000);
     }
     matrix_destruct(mat);
     close_main();
@@ -347,6 +436,7 @@ void close_main() {
 
 void init_palette() {
     GAME_COLORS.DEFAULT = set_rgb_pair(0xff, 0xff, 0xff, 0, 0, 0);
+    GAME_COLORS.DEFAULT_INV = set_rgb_pair(0, 0, 0, 0xff, 0xff, 0xff);
     GAME_COLORS.I_PIECE = set_rgb_pair(SOLID(0x42, 0xe6, 0xf5));
     GAME_COLORS.J_PIECE = set_rgb_pair(SOLID(0x35, 0x38, 0xcc));
     GAME_COLORS.L_PIECE = set_rgb_pair(SOLID(0xe8, 0xcf, 0x4f));
@@ -357,9 +447,40 @@ void init_palette() {
     GAME_COLORS.BG = set_rgb_pair(SOLID(0x22, 0x22, 0x22));
     GAME_COLORS.SPAWN_ZONE = set_rgb_pair(SOLID(0x11, 0x22, 0x11));
     GAME_COLORS.GHOST = set_rgb_pair(0xcc, 0xcc, 0xcc, 0x27, 0x27, 0x27);
-    GAME_COLORS.GOLDEN = set_rgb_pair(249, 209, 47, 0x22, 0x22, 0x22);
+    GAME_COLORS.GOLDEN = set_rgb_pair(0, 0, 0, 249, 209, 47);
     GAME_COLORS.METEOR = set_rgb_pair(SOLID(2, 2, 23));
     GAME_COLORS.METEOR2 = set_rgb_pair(SOLID(6, 2, 30));
+}
+
+#define METEOR_COUNT 16
+static int meteors[METEOR_COUNT] = {0};
+bool initialized = false;
+void draw_meteors(size_t itr) {
+    if (!initialized) {
+        for (int i = 0; i < METEOR_COUNT; i++)
+            meteors[i] = rand();
+        initialized = true;    
+    }
+    int scry, scrx;
+    getmaxyx(stdscr, scry, scrx);
+    for (int j = 0; j < ELMCOUNT(meteors) / 2; j++) {
+        int* mx = &meteors[2 * j];
+        int* my = &meteors[2 * j + 1];
+        if (itr % 4 == 0) {
+            *mx += (j % 3 == 0? 1 : -1) * (j % 2 + 1);
+            *my += 1 + (rand() % 10 == 0? 1 : 0);
+            if (*mx > scrx) {
+                *mx = 0;
+                *my = rand() % scry;
+            } 
+            if (*mx < 0) *mx = scrx; 
+            if (*my > scry) {
+                *my = 0;
+                *mx = rand() % scrx;
+            }
+        }
+        circ_set((chtype)*mx, (chtype)*my, (chtype)5, ' ', GAME_COLORS.METEOR, GAME_COLORS.METEOR2);
+    }
 }
 
 enum TetrominoType_t toType(char tetromino_letter) {
@@ -659,6 +780,7 @@ Matrix* matrix_construct() {
     ret->_lockDelay = 2;
 
     ret->_gravity = 1;
+    ret->_level = 0;
     ret->_linesCleared = 0;
     ret->_points = 0;
     ret->_lastPoints = 0;
@@ -694,7 +816,7 @@ void M_matrix_make_board(Matrix* this) {
     }
 }
 // resize overload (unused)
-void M_matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
+void matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
     if (this->_board != NULL) {
         M_matrix_destroy_board(this);
     }
@@ -884,7 +1006,7 @@ size_t M_matrix_add_score(Matrix* this, enum ComboType_t current_combo) {
         case Z_SPIN: score_to_add = 300; break;
     }
 
-    if (current_combo == B2B || current_combo == T_SPIN_DOUBLE || current_combo == T_SPIN_TRIPLE) {
+    if (current_combo == B2B || current_combo == T_SPIN_DOUBLE || current_combo == T_SPIN_TRIPLE || current_combo == TETRIS) {
         this->_b2b++;
     } else {
         this->_b2b = 0;
@@ -902,14 +1024,14 @@ void matrix_hdrop(Matrix* this) {
     this->_hdropQueued = true;
 }
 
-void M_matrix_hdrop(Matrix* this) {
-    if (!this->_hdropQueued) return;
+bool M_matrix_hdrop(Matrix* this) {
+    if (!this->_hdropQueued) return true;
     this->_hdropQueued = false;
     M_matrix_unpaste_tet(this);
     this->_tetX = this->_hdropX;
     this->_tetY = this->_hdropY;
     M_matrix_paste_tet(this);
-    M_matrix_lock(this);
+    return M_matrix_lock(this);
 }
 // 7bag tetris
 static bool bag[TETCOUNT] = {0};
@@ -963,8 +1085,6 @@ bool M_matrix_wallkick(Matrix* this, uint8_t start_rot, uint8_t end_rot) {
     for (uint8_t kick_index = 0; kick_index < 4; kick_index++) {
         int offX = startX + kickSubject->offsets[kick_index][0];
         int offY = startY - kickSubject->offsets[kick_index][1];
-        if (offX < 0 || offX >= this->_ncols) continue;
-        if (offY < 0 || offY >= this->_nrows) continue;
         this->_tetX = (minopos_t)offX;
         this->_tetY = (minopos_t)offY;
         if (M_matrix_paste_tet(this)) return true;
@@ -1062,7 +1182,13 @@ bool matrix_apply_gravity(Matrix* this) {
 }
 
 void matrix_death(Matrix* this) {
-    FAILF("You lost the game.\nFinal score: %ld\nFinal line count: %ld\n", this->_points, this->_linesCleared)
+    if (this->_points > highscore)
+        highscore = this->_points;
+    if (this->_linesCleared > highlines)
+        highlines = this->_linesCleared;
+    menu_state = true;
+    // self-delete
+    matrix_destruct(this);
 }
 // return "false" is for failure to spawn piece (death condition)
 bool matrix_hold_piece(Matrix* this) {
@@ -1113,26 +1239,36 @@ bool M_matrix_lock(Matrix* this) {
         this->_lastCombo = current_combo;
         this->_comboAnimTimer = 0;
     }
-
+    this->_level = (uint32_t)this->_linesCleared / 10;
+    if (this->_level > 15) { 
+        this->_level = 15;
+        this->_gravity = (uint16_t)(((this->_linesCleared - 150) / 20) + 2);
+    }
+    this->_lockDelay = this->_level + 4; // some forgiveness
+    this->_updateFrameDelay = (uint32_t)(80 - this->_level * 5);
 
     return matrix_respawn_tet_random(this);
 }
 
-void matrix_update(Matrix* this) {
+// false = death
+bool matrix_update(Matrix* this) {
     this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
     this->_comboAnimTimer++;
     M_matrix_set_hdrop_pos(this);
-    M_matrix_hdrop(this);
+    if (!M_matrix_hdrop(this)) return false;
     if (this->_updateFrameCounter == 0) {
         if (this->_lockCounter > this->_lockDelay) {
             if (matrix_apply_gravity(this)) this->_lockCounter -= 1; // quick fix
-            if (!M_matrix_lock(this)) matrix_death(this);
+            if (!M_matrix_lock(this)) {
+                return false;
+            }
         }
         if (!matrix_apply_gravity(this)) {
             this->_lockCounter++;
         }
     }
 
+    return true;
 }
 
 void matrix_draw(Matrix* this) {
@@ -1143,16 +1279,17 @@ void matrix_draw(Matrix* this) {
     int startx = (winx / 2) - (this->_ncols / 2);
     int starty = (winy / 2) - (this->_nrows / 2);
 
+    bool too_short_flag = false;
+    bool too_narrow_flag = false;
 
     for (int y = starty; y < this->_nrows + starty; y++) {
         if (y < 0 || y > winy - 3) {
-            GCOLOR(DEFAULT, mvaddstr(0, winx, "^ Make window taller! ^"));
-            GCOLOR(DEFAULT, mvaddstr(winy - 1, winx, "v Make window taller! v"));
+            too_short_flag = true;
             continue;
         }
         for (int x = startx; x < this->_ncols + startx; x++) {
             if (x < 0 || x > winx - 3) {
-                GCOLOR(DEFAULT, mvaddstr(winy / 2, 0, "<- Make window wider! ->"));
+                too_narrow_flag = true;
                 continue;
             }
             if (y >= starty + STATE_DIM + this->_rootY) {
@@ -1180,6 +1317,7 @@ void matrix_draw(Matrix* this) {
     // draw held piece
     for (int y = starty; y < starty + STATE_DIM + 2; y++) {
         for (int x = this->_ncols + startx + 2; x < this->_ncols + startx + 2 + STATE_DIM + 2; x++) { 
+            if (x > winx - 3) too_narrow_flag = true;
             GCOLOR(BG, mvaddch_sq(y, x, ' '));
             if (this->_heldPiece == INVALID) continue;
 
@@ -1197,18 +1335,24 @@ void matrix_draw(Matrix* this) {
         }
     }
     GCOLOR(BG, draw_text_centered((this->_ncols + startx + 2) * 2 + (STATE_DIM * 2 + 4) / 2, starty, "HELD:"));
+    char level_str[32] = {0};
     char lines_cleared_str[64] = {0};
     char score_str[64] = {0};
     char last_score_str[64] = {0};
     char last_combo_str[64] = {0};
+    char b2b_str[32] = {0};
+    snprintf(level_str, 31, "Level: %d", this->_level);
     snprintf(lines_cleared_str, 63, "Current Lines Cleared: %ld", this->_linesCleared);
     snprintf(score_str, 63, "Current Total Score: %ld", this->_points);
     snprintf(last_score_str, 63, "Latest Score: %ld", this->_lastPoints);
     snprintf(last_combo_str, 63, "Latest Combo: %s", combo_to_name(this->_lastCombo));
-    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 4, startx * 2 + this->_ncols * 2 + 2, lines_cleared_str));
-    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 3, startx * 2 + this->_ncols * 2 + 2, score_str));
-    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 2, startx * 2 + this->_ncols * 2 + 2, last_score_str));
-    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 1, startx * 2 + this->_ncols * 2 + 2, last_combo_str));
+    snprintf(b2b_str, 31, "B2B Streak: %ld", this->_b2b);
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 7, startx * 2 + this->_ncols * 2 + 2, level_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 5, startx * 2 + this->_ncols * 2 + 2, lines_cleared_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 4, startx * 2 + this->_ncols * 2 + 2, score_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 3, startx * 2 + this->_ncols * 2 + 2, last_score_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 2, startx * 2 + this->_ncols * 2 + 2, last_combo_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 1, startx * 2 + this->_ncols * 2 + 2, b2b_str));
 
     #define COMBO_ANIM_LEN 200
     if (this->_comboAnimTimer < COMBO_ANIM_LEN) {
@@ -1239,9 +1383,18 @@ void matrix_draw(Matrix* this) {
         }
 
     }
+
+    if (too_short_flag) {
+        GCOLOR(GOLDEN, draw_text_centered(winx, 0, "^ Make window taller! ^"));
+        GCOLOR(GOLDEN, draw_text_centered(winx, winy - 1, "v Make window taller! v"));
+    }
+    if (too_narrow_flag) {
+        GCOLOR(GOLDEN, draw_text_centered(winx, winy / 2, "<- Make window wider! ->"));
+    }
 }
 
 void matrix_destruct(Matrix* this) {
+    if (this == NULL) return;
     M_matrix_destroy_board(this);
     free(this);
 }
