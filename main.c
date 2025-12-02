@@ -44,7 +44,7 @@ typedef uint8_t ColorPair_t;
 
 // STRUCTS -------------------------------------------
 struct ColorSet {
-    ColorPair_t DEFAULT, BG, SPAWN_ZONE, GHOST, GOLDEN;
+    ColorPair_t DEFAULT, BG, SPAWN_ZONE, GHOST, GOLDEN, METEOR, METEOR2;
     ColorPair_t I_PIECE, J_PIECE, L_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE;
 } GAME_COLORS;
 #define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt)) // version that aliases colors stored within the global struct
@@ -172,7 +172,7 @@ uint8_t set_rgb_pair(uint8_t fr, uint8_t fb, uint8_t fg, uint8_t br, uint8_t bg,
 void init_main();
 void init_palette();
 void close_main();
-void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno);
+void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno1, int pairno2);
 void draw_text_centered(int x_cent, int y_cent, const char* str);
 enum TetrominoType_t toType(char tetromino_letter);
 void parse_kicks_file();
@@ -219,23 +219,49 @@ void matrix_death(Matrix*);
 static bool running_flag = true;
 int main() {
 
-    for (int i = 0; i < 20; i++) rand();
     init_main();
     init_palette();
     parse_game_data();
     Matrix* mat = matrix_construct();
 
     matrix_respawn_tet_random(mat);
+    int meteors[16] = {rand(), rand(), rand(), rand(), rand(), rand(),rand(), rand(), rand(), rand(), rand(), rand(), rand(), rand(),rand(), rand()};
 
+    
     int c = 0;
+    size_t itr = 0;
     while (running_flag) {
         int scry, scrx;
+        itr++;
 
         getmaxyx(stdscr, scry, scrx);
         for (int y = 0; y < scry; y++) {
             for (int x = 0; x < scrx; x++) {
-                GCOLOR(DEFAULT, mvaddch(y, x, ' ')); // clear() doesn't work how I want it to
+                //GCOLOR(DEFAULT, mvaddch(y, x, ' ')); // clear() doesn't work how I want it to
+                if (rand() % 20 == 0) {
+                    GCOLOR(DEFAULT, mvaddch(y, x, ' '));
+                }
             }
+        }
+
+        for (int j = 0; j < ELMCOUNT(meteors) / 2; j++) {
+            int* mx = &meteors[2 * j];
+            int* my = &meteors[2 * j + 1];
+            if (itr % 4 == 0) {
+                *mx += (j % 3 == 0? 1 : -1) * (j % 2 + 1);
+                *my += 1 + (rand() % 10 == 0? 1 : 0);
+                if (*mx > scrx) {
+                    *mx = 0;
+                    *my = rand() % scry;
+                } 
+                if (*mx < 0) *mx = scrx; 
+                if (*my > scry) {
+                    *my = 0;
+                    *mx = rand() % scrx;
+                }
+            }
+            circ_set((chtype)*mx, (chtype)*my, (chtype)7, ' ', GAME_COLORS.METEOR, GAME_COLORS.METEOR2);
+
         }
 
         switch (c) {
@@ -332,6 +358,8 @@ void init_palette() {
     GAME_COLORS.SPAWN_ZONE = set_rgb_pair(SOLID(0x11, 0x22, 0x11));
     GAME_COLORS.GHOST = set_rgb_pair(0xcc, 0xcc, 0xcc, 0x27, 0x27, 0x27);
     GAME_COLORS.GOLDEN = set_rgb_pair(249, 209, 47, 0x22, 0x22, 0x22);
+    GAME_COLORS.METEOR = set_rgb_pair(SOLID(2, 2, 23));
+    GAME_COLORS.METEOR2 = set_rgb_pair(SOLID(6, 2, 30));
 }
 
 enum TetrominoType_t toType(char tetromino_letter) {
@@ -565,7 +593,7 @@ void parse_game_data() {
     parse_kicks_file();
 }
 
-void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno) {
+void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno1, int pairno2) {
     int y_start = (int)y_cent - (int)r;
     int y_end = (int)y_cent + (int)r;
     int x_start = (int)x_cent - (int)r;
@@ -577,10 +605,17 @@ void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno) {
             if (cx < 0) continue;
             int x_mov = cx - (int)x_cent;
             int y_mov = (cy - (int)y_cent) * 2; // aspect ratio
-            attron(COLOR_PAIR(pairno));
-            if (x_mov * x_mov + y_mov * y_mov < r * r)
-                mvaddch(cy, cx, (chtype)c);
-            attroff(COLOR_PAIR(pairno));
+            if (rand() % 2 == 0) {
+                attron(COLOR_PAIR(pairno1));
+                if (x_mov * x_mov + y_mov * y_mov < r * r)
+                    mvaddch(cy, cx, (chtype)c);
+                attroff(COLOR_PAIR(pairno1));
+            } else {
+                attron(COLOR_PAIR(pairno2));
+                if (x_mov * x_mov + y_mov * y_mov < r * r)
+                    mvaddch(cy, cx, (chtype)c);
+                attroff(COLOR_PAIR(pairno2));
+            }
 
         }
     }
@@ -1027,7 +1062,7 @@ bool matrix_apply_gravity(Matrix* this) {
 }
 
 void matrix_death(Matrix* this) {
-    FAILF("You lost the game.\nFinal score: %ld\nFinal line count:%ld\n", this->_points, this->_linesCleared)
+    FAILF("You lost the game.\nFinal score: %ld\nFinal line count: %ld\n", this->_points, this->_linesCleared)
 }
 // return "false" is for failure to spawn piece (death condition)
 bool matrix_hold_piece(Matrix* this) {
