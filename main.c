@@ -44,7 +44,7 @@ typedef uint8_t ColorPair_t;
 
 // STRUCTS -------------------------------------------
 struct ColorSet {
-    ColorPair_t DEFAULT, BG, SPAWN_ZONE, GHOST;
+    ColorPair_t DEFAULT, BG, SPAWN_ZONE, GHOST, GOLDEN;
     ColorPair_t I_PIECE, J_PIECE, L_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE;
 } GAME_COLORS;
 #define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt)) // version that aliases colors stored within the global struct
@@ -159,6 +159,8 @@ struct Matrix_s {
     enum ComboType_t _lastCombo;
     enum TetrominoType_t _lastScoringPiece;
 
+    uint32_t _comboAnimTimer;
+
     // actual game data
     struct Mino** _board;
 };
@@ -188,7 +190,7 @@ bool M_matrix_paste_tet(Matrix*);
 void M_matrix_unpaste_tet(Matrix*);
 void M_matrix_set_hdrop_pos(Matrix*);
 bool M_matrix_test_if_stuck(Matrix*);
-void M_matrix_lock(Matrix*);
+bool M_matrix_lock(Matrix*);
 void M_matrix_hdrop(Matrix*);
 bool M_matrix_wallkick(Matrix*, uint8_t, uint8_t);
 enum ComboType_t M_matrix_check_combo_type(Matrix*, bool, uint16_t, enum TetrominoType_t);
@@ -208,6 +210,7 @@ bool matrix_apply_gravity(Matrix*);
 bool matrix_hold_piece(Matrix*);
 void matrix_update(Matrix*);
 void matrix_draw(Matrix*);
+void matrix_death(Matrix*);
 
 // end member functs --
 
@@ -216,7 +219,7 @@ void matrix_draw(Matrix*);
 static bool running_flag = true;
 int main() {
 
-
+    for (int i = 0; i < 20; i++) rand();
     init_main();
     init_palette();
     parse_game_data();
@@ -255,7 +258,7 @@ int main() {
                 matrix_hdrop(mat);
             break;
             case 'c':
-                matrix_hold_piece(mat);
+                if (!matrix_hold_piece(mat)) matrix_death(mat);
             break;
         }
         matrix_update(mat);
@@ -328,6 +331,7 @@ void init_palette() {
     GAME_COLORS.BG = set_rgb_pair(SOLID(0x22, 0x22, 0x22));
     GAME_COLORS.SPAWN_ZONE = set_rgb_pair(SOLID(0x11, 0x22, 0x11));
     GAME_COLORS.GHOST = set_rgb_pair(0xcc, 0xcc, 0xcc, 0x27, 0x27, 0x27);
+    GAME_COLORS.GOLDEN = set_rgb_pair(249, 209, 47, 0x22, 0x22, 0x22);
 }
 
 enum TetrominoType_t toType(char tetromino_letter) {
@@ -614,7 +618,7 @@ Matrix* matrix_construct() {
     ret->_hdropQueued = false;
 
     ret->_updateFrameCounter = 0;
-    ret->_updateFrameDelay = 40;
+    ret->_updateFrameDelay = 80;
 
     ret->_lockCounter = 0;
     ret->_lockDelay = 2;
@@ -626,6 +630,8 @@ Matrix* matrix_construct() {
     ret->_b2b = 0;
     ret->_lastCombo = NOTHING;
     ret->_lastScoringPiece = INVALID;
+
+    ret->_comboAnimTimer = 0;
 
     ret->_board = NULL;
     M_matrix_make_board(ret); // default size
@@ -1020,9 +1026,12 @@ bool matrix_apply_gravity(Matrix* this) {
     return true;
 }
 
-// return "false" is for failure to hold
+void matrix_death(Matrix* this) {
+    FAILF("You lost the game.\nFinal score: %ld\nFinal line count:%ld\n", this->_points, this->_linesCleared)
+}
+// return "false" is for failure to spawn piece (death condition)
 bool matrix_hold_piece(Matrix* this) {
-    if (!this->_holdAllowable) return false;
+    if (!this->_holdAllowable) return true;
 
     M_matrix_unpaste_tet(this);
     
@@ -1041,15 +1050,15 @@ bool matrix_hold_piece(Matrix* this) {
     }
     
 }
-// solidifies the current piece
-void M_matrix_lock(Matrix* this) {
+// solidifies the current piece, return false is for failure to spawn
+bool M_matrix_lock(Matrix* this) {
     M_matrix_unpaste_tet(this);
     this->_tetY++;
     // don't lock if piece can still fall
     if (M_matrix_test_tet(this)) {
         this->_tetY--;
         M_matrix_paste_tet(this);
-        return;
+        return true;
     }
     this->_tetY--;
 
@@ -1067,20 +1076,22 @@ void M_matrix_lock(Matrix* this) {
         this->_lastScoringPiece = last_dropped;
         this->_lastPoints = M_matrix_add_score(this, current_combo);
         this->_lastCombo = current_combo;
+        this->_comboAnimTimer = 0;
     }
 
 
-    matrix_respawn_tet_random(this);
+    return matrix_respawn_tet_random(this);
 }
 
 void matrix_update(Matrix* this) {
     this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
+    this->_comboAnimTimer++;
     M_matrix_set_hdrop_pos(this);
     M_matrix_hdrop(this);
     if (this->_updateFrameCounter == 0) {
         if (this->_lockCounter > this->_lockDelay) {
             if (matrix_apply_gravity(this)) this->_lockCounter -= 1; // quick fix
-            M_matrix_lock(this);
+            if (!M_matrix_lock(this)) matrix_death(this);
         }
         if (!matrix_apply_gravity(this)) {
             this->_lockCounter++;
@@ -1163,6 +1174,36 @@ void matrix_draw(Matrix* this) {
     GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 3, startx * 2 + this->_ncols * 2 + 2, score_str));
     GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 2, startx * 2 + this->_ncols * 2 + 2, last_score_str));
     GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 1, startx * 2 + this->_ncols * 2 + 2, last_combo_str));
+
+    #define COMBO_ANIM_LEN 200
+    if (this->_comboAnimTimer < COMBO_ANIM_LEN) {
+        const char* combo_text = combo_to_name(this->_lastCombo);
+        int32_t combo_text_len = (int)strlen(combo_text);
+        if (this->_lastPoints < 800)
+            GCOLOR(DEFAULT, draw_text_centered(winx, starty + STATE_DIM + this->_rootY + 3, combo_text))
+        else
+            GCOLOR(GOLDEN, draw_text_centered(winx, starty + STATE_DIM + this->_rootY + 3, combo_text));
+
+
+        if (this->_comboAnimTimer < COMBO_ANIM_LEN / 2) {
+            float t = (float)this->_comboAnimTimer / (float)(COMBO_ANIM_LEN / 2);
+            for (int mask_x = -combo_text_len / 2; mask_x <= combo_text_len / 2; mask_x++) {
+                // shutter effect
+                if ((float)(mask_x + combo_text_len / 2) / (float)(combo_text_len) > t) {
+                    GCOLOR(BG, mvaddch(starty + STATE_DIM + this->_rootY + 3, winx + mask_x, ' '))
+                }
+            }
+        } else if (this->_comboAnimTimer > 3 * COMBO_ANIM_LEN / 4) {
+            float t = (float)(this->_comboAnimTimer - 3 * COMBO_ANIM_LEN / 4) / (float)(COMBO_ANIM_LEN / 4);
+            for (int mask_x = -combo_text_len / 2; mask_x <= combo_text_len / 2; mask_x++) {
+                // shutter effect
+                if ((float)(mask_x + combo_text_len / 2) / (float)(combo_text_len) < t) {
+                    GCOLOR(BG, mvaddch(starty + STATE_DIM + this->_rootY + 3, winx + mask_x, ' '))
+                }
+            }
+        }
+
+    }
 }
 
 void matrix_destruct(Matrix* this) {
