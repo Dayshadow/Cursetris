@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <termios.h>
 #include <signal.h>
+#include <string.h>
 
 // DEFINES ----------------------------------------
 #define COLOR(x, stmt) {attron(COLOR_PAIR(x)); \
@@ -81,6 +82,44 @@ struct TetrominoDef TData[TETCOUNT] = {0};
 // unit for game board positions
 typedef int16_t minopos_t;
 
+// different kinds of scoring conditions for line clears
+enum ComboType_t {
+    NOTHING,
+    SINGLE,
+    DOUBLE,
+    TRIPLE,
+    TETRIS,
+    MINI_T_SPIN,
+    T_SPIN_SINGLE,
+    T_SPIN_DOUBLE,
+    T_SPIN_TRIPLE,
+    B2B,
+    // some fun ones
+    I_SPIN,
+    J_SPIN,
+    L_SPIN,
+    S_SPIN,
+    Z_SPIN
+};
+const char* combo_to_name(enum ComboType_t combo) {
+    static const char* names[] = {
+        "None",
+        "Single",
+        "Double",
+        "Triple",
+        "- Tetris -",
+        "Mini T-Spin",
+        "T-Spin Single",
+        "- T-Spin Double -",
+        "-| T-Spin Triple |-",
+        "Back-To-Back",
+        "I-Spin",
+        "J-Spin",
+        "S-Spin",
+        "Z-Spin"
+    };
+    return names[(int)combo];
+}
 // The game board, handles most of game state
 struct Matrix_s {
     minopos_t _nrows;
@@ -114,6 +153,11 @@ struct Matrix_s {
 
     uint16_t _gravity; // amount to fall each step, only matters once the update counter is at its fastest
     size_t _linesCleared;
+    size_t _points;
+    size_t _lastPoints;
+    size_t _b2b;
+    enum ComboType_t _lastCombo;
+    enum TetrominoType_t _lastScoringPiece;
 
     // actual game data
     struct Mino** _board;
@@ -127,6 +171,7 @@ void init_main();
 void init_palette();
 void close_main();
 void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno);
+void draw_text_centered(int x_cent, int y_cent, const char* str);
 enum TetrominoType_t toType(char tetromino_letter);
 void parse_kicks_file();
 void parse_rotations_file();
@@ -137,29 +182,32 @@ ColorPair_t toPieceColor(enum TetrominoType_t piece);
 // private
 void M_matrix_make_board(Matrix*);
 void M_matrix_destroy_board(Matrix*);
-void M_matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols);
-bool M_matrix_test_tet(Matrix* this);
-bool M_matrix_paste_tet(Matrix* this);
-void M_matrix_unpaste_tet(Matrix* this);
-void M_matrix_set_hdrop_pos(Matrix* this);
+void M_matrix_make_board_rs(Matrix*, minopos_t, minopos_t);
+bool M_matrix_test_tet(Matrix*);
+bool M_matrix_paste_tet(Matrix*);
+void M_matrix_unpaste_tet(Matrix*);
+void M_matrix_set_hdrop_pos(Matrix*);
+bool M_matrix_test_if_stuck(Matrix*);
 void M_matrix_lock(Matrix*);
-void M_matrix_hdrop(Matrix* this);
-bool M_matrix_wallkick(Matrix* this, uint8_t start_rot, uint8_t end_rot);
+void M_matrix_hdrop(Matrix*);
+bool M_matrix_wallkick(Matrix*, uint8_t, uint8_t);
+enum ComboType_t M_matrix_check_combo_type(Matrix*, bool, uint16_t, enum TetrominoType_t);
+size_t M_matrix_add_score(Matrix* this, enum ComboType_t current_combo);
 
 // public
 Matrix* matrix_construct();
-void matrix_destruct(Matrix* this);
-void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t rot_index);
-void matrix_hdrop(Matrix* this);
-bool matrix_respawn_tet(Matrix* this);
+void matrix_destruct(Matrix*);
+void matrix_set_current_piece(Matrix*, enum TetrominoType_t, uint8_t);
+void matrix_hdrop(Matrix*);
+bool matrix_respawn_tet(Matrix*);
 bool matrix_respawn_tet_random(Matrix*);
-bool matrix_rotate_piece(Matrix* this, int8_t dir);
-bool matrix_slide_piece(Matrix* this, int8_t shift);
-uint16_t matrix_test_lines(Matrix* this);
-bool matrix_apply_gravity(Matrix* this);
-bool matrix_hold_piece(Matrix* this);
-void matrix_update(Matrix* this);
-void matrix_draw(Matrix* this);
+bool matrix_rotate_piece(Matrix*, int8_t);
+bool matrix_slide_piece(Matrix*, int8_t);
+uint16_t matrix_test_lines(Matrix*);
+bool matrix_apply_gravity(Matrix*);
+bool matrix_hold_piece(Matrix*);
+void matrix_update(Matrix*);
+void matrix_draw(Matrix*);
 
 // end member functs --
 
@@ -216,7 +264,7 @@ int main() {
 
         c = getch();
 
-        usleep(16000);
+        usleep(10000);
     }
     matrix_destruct(mat);
     close_main();
@@ -534,6 +582,12 @@ void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno) {
     }
 }
 
+void draw_text_centered(int x_cent, int y_cent, const char* str) {
+    size_t len = strlen(str);
+    int x_start = x_cent - (int)len / 2;
+    mvaddstr(y_cent, x_start, str);
+}
+
 // initialize class
 Matrix* matrix_construct() {
     Matrix* ret = (Matrix*)calloc(1, sizeof(Matrix));
@@ -567,6 +621,11 @@ Matrix* matrix_construct() {
 
     ret->_gravity = 1;
     ret->_linesCleared = 0;
+    ret->_points = 0;
+    ret->_lastPoints = 0;
+    ret->_b2b = 0;
+    ret->_lastCombo = NOTHING;
+    ret->_lastScoringPiece = INVALID;
 
     ret->_board = NULL;
     M_matrix_make_board(ret); // default size
@@ -688,6 +747,110 @@ void M_matrix_set_hdrop_pos(Matrix* this) {
     M_matrix_paste_tet(this);
 }
 
+// for spins
+bool M_matrix_test_if_stuck(Matrix* this) {
+    M_matrix_unpaste_tet(this);
+    bool flag = false;
+    this->_tetX += 1; // check right
+    flag = flag || M_matrix_test_tet(this);
+    this->_tetX -= 2; // check left
+    flag = flag || M_matrix_test_tet(this);
+    this->_tetX += 1; // check top
+    this->_tetY -= 1;
+    flag = flag || M_matrix_test_tet(this);
+    this->_tetY += 2; // check bottom
+    flag = flag || M_matrix_test_tet(this);
+    this->_tetY -= 1;
+    M_matrix_paste_tet(this);
+    return !flag;
+}
+
+enum ComboType_t M_matrix_check_combo_type(Matrix* this, bool is_stuck, uint16_t lines_cleared, enum TetrominoType_t locked_piece) {
+    if (is_stuck) {
+        switch (locked_piece) { // O should never be able to be locked
+            case T:
+                switch (lines_cleared) {
+                    case 0: return MINI_T_SPIN;
+                    case 1: return T_SPIN_SINGLE;
+                    case 2: return T_SPIN_DOUBLE;
+                    case 3: return T_SPIN_TRIPLE;
+                    default: return NOTHING;
+                }
+            break;
+            case I: return I_SPIN;
+            case J: return J_SPIN;
+            case L: return L_SPIN;
+            case S: return S_SPIN;
+            case Z: return Z_SPIN;
+            default: return NOTHING;
+        }
+    } else {
+        switch (locked_piece) {
+            case I: case J: case L: case S: case Z: case O: case T:
+            switch (lines_cleared) {
+                case 0: return NOTHING;
+                case 1: return SINGLE;
+                case 2: return DOUBLE;
+                case 3: return TRIPLE;
+                case 4: 
+                    if (this->_lastCombo == TETRIS || this->_lastCombo == B2B)
+                        return B2B;
+                    else
+                        return TETRIS;
+                default: return NOTHING;
+            }
+            default: return NOTHING;
+        }
+    }
+
+}
+
+size_t M_matrix_add_score(Matrix* this, enum ComboType_t current_combo) {
+    size_t score_to_add;
+    switch (current_combo) {
+        case NOTHING: score_to_add = 0; break;
+        case SINGLE: score_to_add = 100; break;
+        case DOUBLE: score_to_add = 300; break;
+        case TRIPLE: score_to_add = 500; break;
+        case TETRIS: score_to_add = 800; break;
+        case MINI_T_SPIN: score_to_add = 100; break;
+        case T_SPIN_SINGLE: score_to_add = 800; break;
+        case T_SPIN_DOUBLE: score_to_add = 1200;
+            if (this->_lastCombo == B2B || this->_lastCombo == T_SPIN_DOUBLE || this->_lastCombo == T_SPIN_TRIPLE)
+                score_to_add += 600; // bonus for chaining hard moves
+        break;
+        case T_SPIN_TRIPLE: 
+            score_to_add = 1600;
+            if (this->_lastCombo == B2B || this->_lastCombo == T_SPIN_DOUBLE || this->_lastCombo == T_SPIN_TRIPLE)
+                score_to_add += 800; // bonus for chaining hard moves
+        break;
+        case B2B: 
+            switch (this->_lastScoringPiece) {
+                case I:
+                    score_to_add = 1200;
+                break;
+                case T:
+                    score_to_add = 1800;
+                break;
+                default: score_to_add = 0;
+            }
+        break;
+        // some fun ones
+        case I_SPIN: score_to_add = 300; break;
+        case J_SPIN: score_to_add = 300; break;
+        case L_SPIN: score_to_add = 300; break;
+        case S_SPIN: score_to_add = 300; break;
+        case Z_SPIN: score_to_add = 300; break;
+    }
+
+    if (current_combo == B2B || current_combo == T_SPIN_DOUBLE || current_combo == T_SPIN_TRIPLE) {
+        this->_b2b++;
+    } else {
+        this->_b2b = 0;
+    }
+    this->_points += score_to_add;
+    return score_to_add;
+}
 void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t rot_index) {
     this->_currentPiece = kind;
     this->_currentRot = rot_index % 4;
@@ -842,6 +1005,7 @@ uint16_t matrix_test_lines(Matrix* this) {
 
     return lines_cleared;
 }
+
 bool matrix_apply_gravity(Matrix* this) {
     // attempt to move down, true if succeed, false if stuck
     for (uint16_t step = 0; step < this->_gravity; step++) {
@@ -888,10 +1052,27 @@ void M_matrix_lock(Matrix* this) {
         return;
     }
     this->_tetY--;
+
+    bool is_stuck = M_matrix_test_if_stuck(this);
+
     M_matrix_paste_tet(this);
-    matrix_test_lines(this);
+
+    enum TetrominoType_t last_dropped = this->_currentPiece;
+    uint16_t lines_cleared = matrix_test_lines(this);
+    this->_linesCleared += lines_cleared;
+
+    enum ComboType_t current_combo = M_matrix_check_combo_type(this, is_stuck, lines_cleared, last_dropped);
+
+    if (current_combo != NOTHING) {
+        this->_lastScoringPiece = last_dropped;
+        this->_lastPoints = M_matrix_add_score(this, current_combo);
+        this->_lastCombo = current_combo;
+    }
+
+
     matrix_respawn_tet_random(this);
 }
+
 void matrix_update(Matrix* this) {
     this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
     M_matrix_set_hdrop_pos(this);
@@ -953,8 +1134,8 @@ void matrix_draw(Matrix* this) {
     // draw held piece
     for (int y = starty; y < starty + STATE_DIM + 2; y++) {
         for (int x = this->_ncols + startx + 2; x < this->_ncols + startx + 2 + STATE_DIM + 2; x++) { 
-            if (this->_heldPiece == INVALID) continue;
             GCOLOR(BG, mvaddch_sq(y, x, ' '));
+            if (this->_heldPiece == INVALID) continue;
 
             minopos_t held_local_x = (minopos_t)(x - (this->_ncols + startx + 2)) - 1;
             minopos_t held_local_y = (minopos_t)(y - (starty)) - 1;
@@ -969,6 +1150,19 @@ void matrix_draw(Matrix* this) {
 
         }
     }
+    GCOLOR(BG, draw_text_centered((this->_ncols + startx + 2) * 2 + (STATE_DIM * 2 + 4) / 2, starty, "HELD:"));
+    char lines_cleared_str[64] = {0};
+    char score_str[64] = {0};
+    char last_score_str[64] = {0};
+    char last_combo_str[64] = {0};
+    snprintf(lines_cleared_str, 63, "Current Lines Cleared: %ld", this->_linesCleared);
+    snprintf(score_str, 63, "Current Total Score: %ld", this->_points);
+    snprintf(last_score_str, 63, "Latest Score: %ld", this->_lastPoints);
+    snprintf(last_combo_str, 63, "Latest Combo: %s", combo_to_name(this->_lastCombo));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 4, startx * 2 + this->_ncols * 2 + 2, lines_cleared_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 3, startx * 2 + this->_ncols * 2 + 2, score_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 2, startx * 2 + this->_ncols * 2 + 2, last_score_str));
+    GCOLOR(DEFAULT, mvaddstr(starty + this->_nrows - 1, startx * 2 + this->_ncols * 2 + 2, last_combo_str));
 }
 
 void matrix_destruct(Matrix* this) {
