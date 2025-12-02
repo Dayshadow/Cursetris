@@ -43,7 +43,7 @@ typedef uint8_t ColorPair_t;
 
 // STRUCTS -------------------------------------------
 struct ColorSet {
-    ColorPair_t DEFAULT, BG, GHOST;
+    ColorPair_t DEFAULT, BG, SPAWN_ZONE, GHOST;
     ColorPair_t I_PIECE, J_PIECE, L_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE;
 } GAME_COLORS;
 #define GCOLOR(x, stmt) COLOR(GAME_COLORS.x, (stmt)) // version that aliases colors stored within the global struct
@@ -128,414 +128,39 @@ void init_palette();
 void close_main();
 void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno);
 enum TetrominoType_t toType(char tetromino_letter);
+void parse_kicks_file();
+void parse_rotations_file();
 void parse_game_data();
-
+ColorPair_t toPieceColor(enum TetrominoType_t piece);
 // member functs ------
 
-// create piece data
+// private
 void M_matrix_make_board(Matrix*);
-
-// initialize class
-Matrix* matrix_construct() {
-    Matrix* ret = (Matrix*)calloc(1, sizeof(Matrix));
-    ret->_ncols = 10; // these could be #defines, but I feel like making it adjustable
-    ret->_nrows = 24;
-
-    ret->_rootX = 3;
-    ret->_rootY = 3;
-
-    ret->_tetX = ret->_rootX;
-    ret->_tetY = ret->_rootY;
-
-    ret->_heldPiece = INVALID;
-    ret->_currentPiece = INVALID;
-    ret->_currentPieceData = NULL;
-
-    ret->_currentRot = 0;
-
-    ret->_holdAllowable = true;
-    ret->_pieceStopped = false;
-
-    ret->_hdropX = 0;
-    ret->_hdropY = 0;
-    ret->_hdropQueued = false;
-
-    ret->_updateFrameCounter = 0;
-    ret->_updateFrameDelay = 10;
-
-    ret->_lockCounter = 0;
-    ret->_lockDelay = 5;
-
-    ret->_gravity = 1;
-    ret->_linesCleared = 0;
-
-    ret->_board = NULL;
-    M_matrix_make_board(ret); // default size
-    return ret;
-}
-
-void M_matrix_destroy_board(Matrix* this) {
-    if (this->_board == NULL) return;
-
-    for (minopos_t row = 0; row < this->_nrows; row++) {
-        free(this->_board[row]);
-    }
-    free(this->_board);
-    this->_board = NULL;
-}
-
-void M_matrix_make_board(Matrix* this) {
-    if (this->_board != NULL) {
-        M_matrix_destroy_board(this);
-    }
-
-    this->_board = (struct Mino**)calloc((size_t)this->_nrows, sizeof(struct Mino*));
-    for (minopos_t row = 0; row < this->_nrows; row++) {
-        this->_board[row] = (struct Mino*)calloc((size_t)this->_ncols, sizeof(struct Mino));
-    }
-}
-// resize overload (unused)
-void M_matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
-    if (this->_board != NULL) {
-        M_matrix_destroy_board(this);
-    }
-    if (p_ncols < 1 || p_nrows < 1) FAIL("Invalid board size, negative or zero.\n");
-    this->_nrows = p_nrows;
-    this->_ncols = p_ncols;
-
-    this->_board = (struct Mino**)calloc((size_t)p_nrows, sizeof(struct Mino*));
-    for (minopos_t row = 0; row < p_nrows; row++) {
-        this->_board[row] = (struct Mino*)calloc((size_t)p_ncols, sizeof(struct Mino));
-    }
-}
-
-ColorPair_t toPieceColor(enum TetrominoType_t piece);
-
-// returns true or false depending on whether or not the current tetromino can fit where it is
-bool M_matrix_test_tet(Matrix* this) {
-    // at least one dim is out of bounds
-    bool OOBXflag = false;
-    bool OOBYflag = false;
-    for (minopos_t y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
-        if (y < 0 || y >= this->_nrows) OOBYflag = true;
-
-        for (minopos_t x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
-            if (x < 0 || x >= this->_ncols) OOBXflag = true;
-
-            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
-            struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
-            if (currentCell->occupied) {
-                if (OOBXflag || OOBYflag) return false; // piece failed to paste due to OOB
-                if (this->_board[y][x].occupied) return false; // piece failed due to occupied position
-            }
-            OOBXflag = false;
-        }
-        OOBYflag = false;
-    }
-    return true;
-}
-// pastes the current tetromino into the matrix
-bool M_matrix_paste_tet(Matrix* this) {
-    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
-
-    if (!M_matrix_test_tet(this)) return false;
-
-    for (int y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
-        if (y < 0 || y >= this->_nrows) continue;
-        for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
-            if (x < 0 || x >= this->_ncols) continue;
-            struct Mino* currentCell = &TData[PIECE_TO_INDEX(this->_currentPiece)].rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
-            if (currentCell->occupied)
-                this->_board[y][x] = *currentCell; // no checks failed, add to board
-        }
-    }
-
-    return true;
-}
-
-void M_matrix_unpaste_tet(Matrix* this) {
-    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to unpaste an empty piece.\n");
-
-    for (int y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
-        if (y < 0 || y >= this->_nrows) continue;
-
-        for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
-            if (x < 0 || x >= this->_ncols) continue;
-            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
-            struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
-            if (currentCell->occupied) {
-                this->_board[y][x].occupied = false; // remove mino
-                this->_board[y][x].col = GAME_COLORS.DEFAULT;
-            }
-
-        }
-        
-    }
-}
-
-// for dropping the piece instantly with space, as well as the preview
-void M_matrix_set_hdrop_pos(Matrix* this) {
-    M_matrix_unpaste_tet(this);
-    minopos_t start_y = this->_tetY;
-
-    minopos_t max_itr = this->_nrows;
-    for (minopos_t i = 0; i < max_itr; i++) {
-        this->_tetY++;
-        if (!M_matrix_test_tet(this))
-            break;
-    }
-    this->_hdropX = this->_tetX;
-    this->_hdropY = this->_tetY - 1;
-
-    this->_tetY = start_y;
-    M_matrix_paste_tet(this);
-}
-
-void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t rot_index) {
-    this->_currentPiece = kind;
-    this->_currentRot = rot_index % 4;
-    this->_currentPieceData = &TData[PIECE_TO_INDEX(kind)];
-}
-
-void matrix_hdrop(Matrix* this) {
-    this->_hdropQueued = true;
-}
-
-bool matrix_respawn_tet_random(Matrix*);
+void M_matrix_destroy_board(Matrix*);
+void M_matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols);
+bool M_matrix_test_tet(Matrix* this);
+bool M_matrix_paste_tet(Matrix* this);
+void M_matrix_unpaste_tet(Matrix* this);
+void M_matrix_set_hdrop_pos(Matrix* this);
 void M_matrix_lock(Matrix*);
+void M_matrix_hdrop(Matrix* this);
+bool M_matrix_wallkick(Matrix* this, uint8_t start_rot, uint8_t end_rot);
 
-void M_matrix_hdrop(Matrix* this) {
-    if (!this->_hdropQueued) return;
-    this->_hdropQueued = false;
-    M_matrix_unpaste_tet(this);
-    this->_tetX = this->_hdropX;
-    this->_tetY = this->_hdropY;
-    M_matrix_paste_tet(this);
-    M_matrix_lock(this);
-}
-// 7bag tetris
-static bool bag[TETCOUNT] = {0};
-static uint16_t picked_count = 0;
-enum TetrominoType_t bag_pick() {
-    if (picked_count == TETCOUNT) { // reset bag
-        for (uint16_t i = 0; i < TETCOUNT; i++) bag[i] = false;
-        picked_count = 0;
-    }
-    uint16_t chosen;
-    while (true) { // asymptotic 
-        chosen = (uint16_t)(rand() % TETCOUNT);
-        if (bag[chosen]) continue;
-        picked_count++;
-        bag[chosen] = true;
-        return INDEX_TO_PIECE(chosen);
-        break;
-    }
-}
+// public
+Matrix* matrix_construct();
+void matrix_destruct(Matrix* this);
+void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t rot_index);
+void matrix_hdrop(Matrix* this);
+bool matrix_respawn_tet(Matrix* this);
+bool matrix_respawn_tet_random(Matrix*);
+bool matrix_rotate_piece(Matrix* this, int8_t dir);
+bool matrix_slide_piece(Matrix* this, int8_t shift);
+uint16_t matrix_test_lines(Matrix* this);
+bool matrix_apply_gravity(Matrix* this);
+bool matrix_hold_piece(Matrix* this);
+void matrix_update(Matrix* this);
+void matrix_draw(Matrix* this);
 
-bool matrix_respawn_tet_random(Matrix* this) {
-    matrix_set_current_piece(this, bag_pick(), 0);
-    this->_tetX = this->_rootX;
-    this->_tetY = this->_rootY;
-    this->_lockCounter = 0;
-    this->_updateFrameCounter = 0;
-
-    return M_matrix_paste_tet(this);
-}
-
-bool matrix_respawn_tet(Matrix* this) {
-    this->_tetX = this->_rootX;
-    this->_tetY = this->_rootY;
-    this->_lockCounter = 0;
-    this->_updateFrameCounter = 0;
-
-    return M_matrix_paste_tet(this);
-}
-
-// assume tet is already unpasted, to handle all pasting
-bool M_matrix_wallkick(Matrix* this, uint8_t start_rot, uint8_t end_rot) {
-    int startX = (int)this->_tetX;
-    int startY = (int)this->_tetY;
-
-    // retrieve kick data for current inital-final rotation states
-    struct WallkickDef* kickSubject = &this->_currentPieceData->wallkicks[start_rot][end_rot];
-
-    // go through each offset one by one, checking each xy pair
-    for (uint8_t kick_index = 0; kick_index < 4; kick_index++) {
-        int offX = startX + kickSubject->offsets[kick_index][0];
-        int offY = startY - kickSubject->offsets[kick_index][1];
-        if (offX < 0 || offX >= this->_ncols) continue;
-        if (offY < 0 || offY >= this->_nrows) continue;
-        this->_tetX = (minopos_t)offX;
-        this->_tetY = (minopos_t)offY;
-        if (M_matrix_paste_tet(this)) return true;
-    }
-    this->_tetX = (minopos_t)startX;
-    this->_tetY = (minopos_t)startY;
-    return false;
-}
-
-// assume pasted, dir = -1 for ccw, dir = 1 for cw
-bool matrix_rotate_piece(Matrix* this, int8_t dir) {
-    M_matrix_unpaste_tet(this);
-    // clamp range
-    if (dir > -1) dir = 1;
-    if (dir < 0) dir = -1;
-
-    uint8_t start_rot = this->_currentRot;
-    // loop rotation with modulo
-    this->_currentRot = (uint8_t)((uint8_t)(this->_currentRot + 4u) + dir) % 4u;
-    uint8_t end_rot = this->_currentRot;
-
-    if (M_matrix_paste_tet(this)) {
-        // success, no need to do any kicks
-        return true;
-    } else {
-        // fail, attempt to shift the piece around
-        bool attempt = M_matrix_wallkick(this, start_rot, end_rot);
-        if (!attempt) { // failed to wallkick
-            this->_currentRot = start_rot;
-            M_matrix_paste_tet(this);
-        } else
-            return true;
-    }
-
-    return false;
-}
-
-bool matrix_slide_piece(Matrix* this, int8_t shift) {
-    M_matrix_unpaste_tet(this);
-    this->_tetX += (minopos_t)shift;
-    if (M_matrix_paste_tet(this)) {
-        return true;
-    } else {
-        this->_tetX -= (minopos_t)shift;
-        M_matrix_paste_tet(this);
-        return false;
-    }
-}
-
-uint16_t matrix_test_lines(Matrix* this) {
-
-    struct Mino** next_board = (struct Mino**)calloc((size_t)this->_nrows, sizeof(struct Mino*));
-    for (minopos_t row = 0; row < this->_nrows; row++) {
-        next_board[row] = (struct Mino*)calloc((size_t)this->_ncols, sizeof(struct Mino));
-    }
-    uint16_t lines_cleared = 0;
-    uint16_t lines_not_cleared = 0;
-    for (minopos_t y = this->_nrows - 1; y >= 0; y--) {
-        bool line_flag = true;
-        for (minopos_t x = 0; x < this->_ncols; x++) {
-            if (!this->_board[y][x].occupied) {
-                line_flag = false;
-                break;
-            }
-        }
-        if (!line_flag) {
-            for (minopos_t x = 0; x < this->_ncols; x++) {
-                next_board[this->_nrows - 1 - lines_not_cleared][x] = this->_board[y][x];
-            }
-            lines_not_cleared++;
-        } else {
-            lines_cleared++;
-        }
-    }
-
-    // swap active board
-    M_matrix_destroy_board(this);
-    this->_board = next_board;
-
-    return lines_cleared;
-}
-bool matrix_apply_gravity(Matrix* this) {
-    // attempt to move down, true if succeed, false if stuck
-    for (uint16_t step = 0; step < this->_gravity; step++) {
-        M_matrix_unpaste_tet(this);
-        this->_tetY++;
-        if (!M_matrix_paste_tet(this)) {
-            this->_tetY--;
-            M_matrix_paste_tet(this);
-            return false;
-        }
-    }
-    return true;
-}
-
-bool matrix_hold_piece(Matrix* this) {
-
-}
-// solidifies the current piece
-void M_matrix_lock(Matrix* this) {
-    M_matrix_unpaste_tet(this);
-    this->_tetY++;
-    // don't lock if piece can still fall
-    if (M_matrix_test_tet(this)) {
-        this->_tetY--;
-        M_matrix_paste_tet(this);
-        return;
-    }
-    this->_tetY--;
-    M_matrix_paste_tet(this);
-    matrix_test_lines(this);
-    matrix_respawn_tet_random(this);
-}
-void matrix_update(Matrix* this) {
-    this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
-    M_matrix_set_hdrop_pos(this);
-    M_matrix_hdrop(this);
-    if (this->_updateFrameCounter == 0) {
-        if (this->_lockCounter > this->_lockDelay) {
-            if (matrix_apply_gravity(this)) this->_lockCounter -= 1; // quick fix
-            M_matrix_lock(this);
-        }
-        if (!matrix_apply_gravity(this)) {
-            this->_lockCounter++;
-        }
-    }
-
-}
-
-void matrix_draw(Matrix* this) {
-    int winx, winy;
-    getmaxyx(stdscr, winy, winx);
-    winx /= 2;
-    
-    int startx = (winx / 2) - (this->_ncols / 2);
-    int starty = (winy / 2) - (this->_nrows / 2);
-
-    for (int y = starty; y < this->_nrows + starty; y++) {
-        if (y < 0 || y > winy - 3) {
-            GCOLOR(DEFAULT, mvaddstr(0, winx, "^ Make window taller! ^"));
-            GCOLOR(DEFAULT, mvaddstr(winy - 1, winx, "v Make window taller! v"));
-            continue;
-        }
-        for (int x = startx; x < this->_ncols + startx; x++) {
-            if (x < 0 || x > winx - 3) {
-                GCOLOR(DEFAULT, mvaddstr(winy / 2, 0, "<- Make window wider! ->"));
-                continue;
-            }
-            GCOLOR(BG, mvaddch_sq(y, x, ' '));
-            // draw drop ghost
-            minopos_t ghost_local_x = (minopos_t)(x - startx - this->_hdropX);
-            minopos_t ghost_local_y = (minopos_t)(y - starty - this->_hdropY);
-            if (ghost_local_x >= 0 && ghost_local_x < STATE_DIM && ghost_local_y >= 0 && ghost_local_y < STATE_DIM) {
-                struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
-                struct Mino* gmino = &dat->rotations[this->_currentRot].state[ghost_local_y][ghost_local_x];
-                if (gmino->occupied) {
-                    GCOLOR(GHOST, mvaddch_sq(y, x, '#'));
-                }
-            }
-            struct Mino* mino = &this->_board[y - starty][x - startx];
-            if (mino->occupied)
-                COLOR(mino->col, mvaddch_sq(y, x, ' '));
-
-        }
-    }
-}
-
-void matrix_destruct(Matrix* this) {
-    M_matrix_destroy_board(this);
-    free(this);
-}
 // end member functs --
 
 // END FUNCS ----------------------------------------
@@ -580,6 +205,9 @@ int main() {
             break;
             case ' ':
                 matrix_hdrop(mat);
+            break;
+            case 'c':
+                matrix_hold_piece(mat);
             break;
         }
         matrix_update(mat);
@@ -650,7 +278,8 @@ void init_palette() {
     GAME_COLORS.S_PIECE = set_rgb_pair(SOLID(0x46, 0xe0, 0x1f));
     GAME_COLORS.Z_PIECE = set_rgb_pair(SOLID(0xe3, 0x22, 0x22));
     GAME_COLORS.BG = set_rgb_pair(SOLID(0x22, 0x22, 0x22));
-    GAME_COLORS.GHOST = set_rgb_pair(0xff, 0xff, 0xff, 0x27, 0x27, 0x27);
+    GAME_COLORS.SPAWN_ZONE = set_rgb_pair(SOLID(0x11, 0x22, 0x11));
+    GAME_COLORS.GHOST = set_rgb_pair(0xcc, 0xcc, 0xcc, 0x27, 0x27, 0x27);
 }
 
 enum TetrominoType_t toType(char tetromino_letter) {
@@ -903,4 +532,446 @@ void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno) {
 
         }
     }
+}
+
+// initialize class
+Matrix* matrix_construct() {
+    Matrix* ret = (Matrix*)calloc(1, sizeof(Matrix));
+    ret->_ncols = 10; // these could be #defines, but I feel like making it adjustable
+    ret->_nrows = 24;
+
+    ret->_rootX = 3;
+    ret->_rootY = 3;
+
+    ret->_tetX = ret->_rootX;
+    ret->_tetY = ret->_rootY;
+
+    ret->_heldPiece = INVALID;
+    ret->_currentPiece = INVALID;
+    ret->_currentPieceData = NULL;
+
+    ret->_currentRot = 0;
+
+    ret->_holdAllowable = true;
+    ret->_pieceStopped = false;
+
+    ret->_hdropX = 0;
+    ret->_hdropY = 0;
+    ret->_hdropQueued = false;
+
+    ret->_updateFrameCounter = 0;
+    ret->_updateFrameDelay = 40;
+
+    ret->_lockCounter = 0;
+    ret->_lockDelay = 2;
+
+    ret->_gravity = 1;
+    ret->_linesCleared = 0;
+
+    ret->_board = NULL;
+    M_matrix_make_board(ret); // default size
+    return ret;
+}
+
+void M_matrix_destroy_board(Matrix* this) {
+    if (this->_board == NULL) return;
+
+    for (minopos_t row = 0; row < this->_nrows; row++) {
+        free(this->_board[row]);
+    }
+    free(this->_board);
+    this->_board = NULL;
+}
+
+void M_matrix_make_board(Matrix* this) {
+    if (this->_board != NULL) {
+        M_matrix_destroy_board(this);
+    }
+
+    this->_board = (struct Mino**)calloc((size_t)this->_nrows, sizeof(struct Mino*));
+    for (minopos_t row = 0; row < this->_nrows; row++) {
+        this->_board[row] = (struct Mino*)calloc((size_t)this->_ncols, sizeof(struct Mino));
+    }
+}
+// resize overload (unused)
+void M_matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
+    if (this->_board != NULL) {
+        M_matrix_destroy_board(this);
+    }
+    if (p_ncols < 1 || p_nrows < 1) FAIL("Invalid board size, negative or zero.\n");
+    this->_nrows = p_nrows;
+    this->_ncols = p_ncols;
+
+    this->_board = (struct Mino**)calloc((size_t)p_nrows, sizeof(struct Mino*));
+    for (minopos_t row = 0; row < p_nrows; row++) {
+        this->_board[row] = (struct Mino*)calloc((size_t)p_ncols, sizeof(struct Mino));
+    }
+}
+
+// returns true or false depending on whether or not the current tetromino can fit where it is
+bool M_matrix_test_tet(Matrix* this) {
+    // at least one dim is out of bounds
+    bool OOBXflag = false;
+    bool OOBYflag = false;
+    for (minopos_t y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) OOBYflag = true;
+
+        for (minopos_t x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+            if (x < 0 || x >= this->_ncols) OOBXflag = true;
+
+            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
+            struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
+            if (currentCell->occupied) {
+                if (OOBXflag || OOBYflag) return false; // piece failed to paste due to OOB
+                if (this->_board[y][x].occupied) return false; // piece failed due to occupied position
+            }
+            OOBXflag = false;
+        }
+        OOBYflag = false;
+    }
+    return true;
+}
+// pastes the current tetromino into the matrix
+bool M_matrix_paste_tet(Matrix* this) {
+    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
+
+    if (!M_matrix_test_tet(this)) return false;
+
+    for (int y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) continue;
+        for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+            if (x < 0 || x >= this->_ncols) continue;
+            struct Mino* currentCell = &TData[PIECE_TO_INDEX(this->_currentPiece)].rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
+            if (currentCell->occupied)
+                this->_board[y][x] = *currentCell; // no checks failed, add to board
+        }
+    }
+
+    return true;
+}
+
+void M_matrix_unpaste_tet(Matrix* this) {
+    if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to unpaste an empty piece.\n");
+
+    for (int y = this->_tetY; y < this->_tetY + STATE_DIM; y++) {
+        if (y < 0 || y >= this->_nrows) continue;
+
+        for (int x = this->_tetX; x < this->_tetX + STATE_DIM; x++) {
+            if (x < 0 || x >= this->_ncols) continue;
+            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
+            struct Mino* currentCell = &dat->rotations[this->_currentRot].state[y - this->_tetY][x - this->_tetX];
+            if (currentCell->occupied) {
+                this->_board[y][x].occupied = false; // remove mino
+                this->_board[y][x].col = GAME_COLORS.DEFAULT;
+            }
+
+        }
+        
+    }
+}
+
+// for dropping the piece instantly with space, as well as the preview
+void M_matrix_set_hdrop_pos(Matrix* this) {
+    M_matrix_unpaste_tet(this);
+    minopos_t start_y = this->_tetY;
+
+    minopos_t max_itr = this->_nrows;
+    for (minopos_t i = 0; i < max_itr; i++) {
+        this->_tetY++;
+        if (!M_matrix_test_tet(this))
+            break;
+    }
+    this->_hdropX = this->_tetX;
+    this->_hdropY = this->_tetY - 1;
+
+    this->_tetY = start_y;
+    M_matrix_paste_tet(this);
+}
+
+void matrix_set_current_piece(Matrix* this, enum TetrominoType_t kind, uint8_t rot_index) {
+    this->_currentPiece = kind;
+    this->_currentRot = rot_index % 4;
+    this->_currentPieceData = &TData[PIECE_TO_INDEX(kind)];
+}
+
+void matrix_hdrop(Matrix* this) {
+    this->_hdropQueued = true;
+}
+
+void M_matrix_hdrop(Matrix* this) {
+    if (!this->_hdropQueued) return;
+    this->_hdropQueued = false;
+    M_matrix_unpaste_tet(this);
+    this->_tetX = this->_hdropX;
+    this->_tetY = this->_hdropY;
+    M_matrix_paste_tet(this);
+    M_matrix_lock(this);
+}
+// 7bag tetris
+static bool bag[TETCOUNT] = {0};
+static uint16_t picked_count = 0;
+enum TetrominoType_t bag_pick() {
+    if (picked_count == TETCOUNT) { // reset bag
+        for (uint16_t i = 0; i < TETCOUNT; i++) bag[i] = false;
+        picked_count = 0;
+    }
+    uint16_t chosen;
+    while (true) { // asymptotic 
+        chosen = (uint16_t)(rand() % TETCOUNT);
+        if (bag[chosen]) continue;
+        picked_count++;
+        bag[chosen] = true;
+        return INDEX_TO_PIECE(chosen);
+        break;
+    }
+}
+
+bool matrix_respawn_tet_random(Matrix* this) {
+    matrix_set_current_piece(this, bag_pick(), 0);
+    this->_tetX = this->_rootX;
+    this->_tetY = this->_rootY;
+    this->_lockCounter = 0;
+    this->_updateFrameCounter = 0;
+    this->_holdAllowable = true;
+
+    return M_matrix_paste_tet(this);
+}
+
+bool matrix_respawn_tet(Matrix* this) {
+    this->_tetX = this->_rootX;
+    this->_tetY = this->_rootY;
+    this->_lockCounter = 0;
+    this->_updateFrameCounter = 0;
+    this->_holdAllowable = true;
+
+    return M_matrix_paste_tet(this);
+}
+
+// assume tet is already unpasted, to handle all pasting
+bool M_matrix_wallkick(Matrix* this, uint8_t start_rot, uint8_t end_rot) {
+    int startX = (int)this->_tetX;
+    int startY = (int)this->_tetY;
+
+    // retrieve kick data for current inital-final rotation states
+    struct WallkickDef* kickSubject = &this->_currentPieceData->wallkicks[start_rot][end_rot];
+
+    // go through each offset one by one, checking each xy pair
+    for (uint8_t kick_index = 0; kick_index < 4; kick_index++) {
+        int offX = startX + kickSubject->offsets[kick_index][0];
+        int offY = startY - kickSubject->offsets[kick_index][1];
+        if (offX < 0 || offX >= this->_ncols) continue;
+        if (offY < 0 || offY >= this->_nrows) continue;
+        this->_tetX = (minopos_t)offX;
+        this->_tetY = (minopos_t)offY;
+        if (M_matrix_paste_tet(this)) return true;
+    }
+    this->_tetX = (minopos_t)startX;
+    this->_tetY = (minopos_t)startY;
+    return false;
+}
+
+// assume pasted, dir = -1 for ccw, dir = 1 for cw
+bool matrix_rotate_piece(Matrix* this, int8_t dir) {
+    M_matrix_unpaste_tet(this);
+    // clamp range
+    if (dir > -1) dir = 1;
+    if (dir < 0) dir = -1;
+
+    uint8_t start_rot = this->_currentRot;
+    // loop rotation with modulo
+    this->_currentRot = (uint8_t)((uint8_t)(this->_currentRot + 4u) + dir) % 4u;
+    uint8_t end_rot = this->_currentRot;
+
+    if (M_matrix_paste_tet(this)) {
+        // success, no need to do any kicks
+        return true;
+    } else {
+        // fail, attempt to shift the piece around
+        bool attempt = M_matrix_wallkick(this, start_rot, end_rot);
+        if (!attempt) { // failed to wallkick
+            this->_currentRot = start_rot;
+            M_matrix_paste_tet(this);
+        } else
+            return true;
+    }
+
+    return false;
+}
+
+bool matrix_slide_piece(Matrix* this, int8_t shift) {
+    M_matrix_unpaste_tet(this);
+    this->_tetX += (minopos_t)shift;
+    if (M_matrix_paste_tet(this)) {
+        return true;
+    } else {
+        this->_tetX -= (minopos_t)shift;
+        M_matrix_paste_tet(this);
+        return false;
+    }
+}
+
+uint16_t matrix_test_lines(Matrix* this) {
+
+    struct Mino** next_board = (struct Mino**)calloc((size_t)this->_nrows, sizeof(struct Mino*));
+    for (minopos_t row = 0; row < this->_nrows; row++) {
+        next_board[row] = (struct Mino*)calloc((size_t)this->_ncols, sizeof(struct Mino));
+    }
+    uint16_t lines_cleared = 0;
+    uint16_t lines_not_cleared = 0;
+    for (minopos_t y = this->_nrows - 1; y >= 0; y--) {
+        bool line_flag = true;
+        for (minopos_t x = 0; x < this->_ncols; x++) {
+            if (!this->_board[y][x].occupied) {
+                line_flag = false;
+                break;
+            }
+        }
+        if (!line_flag) {
+            for (minopos_t x = 0; x < this->_ncols; x++) {
+                next_board[this->_nrows - 1 - lines_not_cleared][x] = this->_board[y][x];
+            }
+            lines_not_cleared++;
+        } else {
+            lines_cleared++;
+        }
+    }
+
+    // swap active board
+    M_matrix_destroy_board(this);
+    this->_board = next_board;
+
+    return lines_cleared;
+}
+bool matrix_apply_gravity(Matrix* this) {
+    // attempt to move down, true if succeed, false if stuck
+    for (uint16_t step = 0; step < this->_gravity; step++) {
+        M_matrix_unpaste_tet(this);
+        this->_tetY++;
+        if (!M_matrix_paste_tet(this)) {
+            this->_tetY--;
+            M_matrix_paste_tet(this);
+            return false;
+        }
+    }
+    return true;
+}
+
+// return "false" is for failure to hold
+bool matrix_hold_piece(Matrix* this) {
+    if (!this->_holdAllowable) return false;
+
+    M_matrix_unpaste_tet(this);
+    
+    if (this->_heldPiece == INVALID) {
+        this->_heldPiece = this->_currentPiece;
+        bool ret =  matrix_respawn_tet_random(this);
+        this->_holdAllowable = false; // stop from holding twice in a row
+        return ret;
+    } else {
+        enum TetrominoType_t next = this->_heldPiece;
+        this->_heldPiece = this->_currentPiece;
+        this->_currentPiece = next;
+        bool ret = matrix_respawn_tet(this);
+        this->_holdAllowable = false; // stop from holding twice in a row
+        return ret;
+    }
+    
+}
+// solidifies the current piece
+void M_matrix_lock(Matrix* this) {
+    M_matrix_unpaste_tet(this);
+    this->_tetY++;
+    // don't lock if piece can still fall
+    if (M_matrix_test_tet(this)) {
+        this->_tetY--;
+        M_matrix_paste_tet(this);
+        return;
+    }
+    this->_tetY--;
+    M_matrix_paste_tet(this);
+    matrix_test_lines(this);
+    matrix_respawn_tet_random(this);
+}
+void matrix_update(Matrix* this) {
+    this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
+    M_matrix_set_hdrop_pos(this);
+    M_matrix_hdrop(this);
+    if (this->_updateFrameCounter == 0) {
+        if (this->_lockCounter > this->_lockDelay) {
+            if (matrix_apply_gravity(this)) this->_lockCounter -= 1; // quick fix
+            M_matrix_lock(this);
+        }
+        if (!matrix_apply_gravity(this)) {
+            this->_lockCounter++;
+        }
+    }
+
+}
+
+void matrix_draw(Matrix* this) {
+    int winx, winy;
+    getmaxyx(stdscr, winy, winx);
+    winx /= 2;
+    
+    int startx = (winx / 2) - (this->_ncols / 2);
+    int starty = (winy / 2) - (this->_nrows / 2);
+
+
+    for (int y = starty; y < this->_nrows + starty; y++) {
+        if (y < 0 || y > winy - 3) {
+            GCOLOR(DEFAULT, mvaddstr(0, winx, "^ Make window taller! ^"));
+            GCOLOR(DEFAULT, mvaddstr(winy - 1, winx, "v Make window taller! v"));
+            continue;
+        }
+        for (int x = startx; x < this->_ncols + startx; x++) {
+            if (x < 0 || x > winx - 3) {
+                GCOLOR(DEFAULT, mvaddstr(winy / 2, 0, "<- Make window wider! ->"));
+                continue;
+            }
+            if (y >= starty + STATE_DIM + this->_rootY) {
+                GCOLOR(BG, mvaddch_sq(y, x, ' '));
+            } else {
+                GCOLOR(SPAWN_ZONE, mvaddch_sq(y, x, ' '));
+            }
+            // draw drop ghost
+            minopos_t ghost_local_x = (minopos_t)(x - startx - this->_hdropX);
+            minopos_t ghost_local_y = (minopos_t)(y - starty - this->_hdropY);
+            if (ghost_local_x >= 0 && ghost_local_x < STATE_DIM && ghost_local_y >= 0 && ghost_local_y < STATE_DIM) {
+                struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_currentPiece)];
+                struct Mino* gmino = &dat->rotations[this->_currentRot].state[ghost_local_y][ghost_local_x];
+                if (gmino->occupied) {
+                    GCOLOR(GHOST, mvaddch_sq(y, x, '#'));
+                }
+            }
+            struct Mino* mino = &this->_board[y - starty][x - startx];
+            if (mino->occupied)
+                COLOR(mino->col, mvaddch_sq(y, x, ' '));
+
+        }
+    }
+
+    // draw held piece
+    for (int y = starty; y < starty + STATE_DIM + 2; y++) {
+        for (int x = this->_ncols + startx + 2; x < this->_ncols + startx + 2 + STATE_DIM + 2; x++) { 
+            if (this->_heldPiece == INVALID) continue;
+            GCOLOR(BG, mvaddch_sq(y, x, ' '));
+
+            minopos_t held_local_x = (minopos_t)(x - (this->_ncols + startx + 2)) - 1;
+            minopos_t held_local_y = (minopos_t)(y - (starty)) - 1;
+
+            if (held_local_x >= STATE_DIM || held_local_y >= STATE_DIM || held_local_x < 0 || held_local_y < 0) continue;
+
+            struct TetrominoDef* dat = &TData[PIECE_TO_INDEX(this->_heldPiece)];
+            struct Mino* mino = &dat->rotations[this->_currentRot].state[held_local_y][held_local_x];
+
+            if (mino->occupied)
+                COLOR(mino->col, mvaddch_sq(y, x, ' '));
+
+        }
+    }
+}
+
+void matrix_destruct(Matrix* this) {
+    M_matrix_destroy_board(this);
+    free(this);
 }
