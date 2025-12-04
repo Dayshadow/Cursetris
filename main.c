@@ -13,7 +13,6 @@
 stmt; \
 attroff(COLOR_PAIR(x));}
 
-#define SPAWN_ONE_IN_X 35
 #define C_CHAR(x) (x & 255) // strip extra info off of chtype
 #define ELMCOUNT(x) (sizeof(x) / sizeof(x[0]))
 
@@ -455,7 +454,7 @@ int main() {
     int* opt_value = NULL;
     bool drawbg_flag = true;
 
-    int c = 0;
+    int c = 0; // getch storage
     size_t itr = 0;
     while (running_flag) {
         int scry, scrx;
@@ -566,7 +565,7 @@ int main() {
 
         // game state
         GCOLOR(DEFAULT, mvaddstr(1, 1, "Basic Controls:"));
-        GCOLOR(DEFAULT, mvaddstr(2, 1, " - Left/Right: J/L"));
+        GCOLOR(DEFAULT, mvaddstr(2, 1, " - Left/Right/Down: J/L/K"));
         GCOLOR(DEFAULT, mvaddstr(3, 1, " - Rotate CW: I or X"));
         GCOLOR(DEFAULT, mvaddstr(4, 1, " - Rotate CCW: Z"));
         GCOLOR(DEFAULT, mvaddstr(5, 1, " - Hold Piece: C"));
