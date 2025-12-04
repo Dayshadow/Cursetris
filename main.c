@@ -169,49 +169,270 @@ typedef struct Matrix_s Matrix;
 // END STRUCTS ---------------------------------------
 
 // FUNCTS --------------------------------------------
+
+/**
+ * Create a new `COLOR_PAIR` for ncurses
+ * @param fr Foreground red
+ * @param fb Foreground blue
+ * @param fg Foreground green
+ * @param br Background red
+ * @param bg Background green
+ * @param bb Background blue
+ * @warning Foreground color doesn't always appear accurate to input color. This is probably due to the terminal trying to create text contrast.
+ */
 uint8_t set_rgb_pair(uint8_t fr, uint8_t fb, uint8_t fg, uint8_t br, uint8_t bg, uint8_t bb);
+
+/**
+ * Initialize ncurses and cursor state.
+ */
 void init_main();
+
+/**
+ * Sets every value within GAME_COLORS to pre-defined RGB
+ */
 void init_palette();
+
+/**
+ * Clean up global data
+ */
 void close_main();
+
+/**
+ * Fill a circular region in the terminal
+ * @param x_cent Center X position of the circle to draw
+ * @param y_cent Center Y position of the circle to draw
+ * @param r The radius of the circle, in characters
+ * @param pairno1 The first of two randomized colors for the drawn text to be
+ * @param pairno2 The second of two randomized colors for the drawn text to be
+ */
 void circ_set(chtype x_cent, chtype y_cent, chtype r, char c, int pairno1, int pairno2);
+
+/**
+ * Draw strings centered at their halfway point rather than their start.
+ * @warning String input must be null-terminated, otherwise memory access will be violated.
+ * @param x_cent Which column you want the text to be centered around
+ * @param y_cent Which row the string should occupy
+ * @param a cstring to draw
+ */
 void draw_text_centered(int x_cent, int y_cent, const char* str);
+
+/**
+ * Converts from piece letter (I, O, J, L, S, Z, T) to enumerical value.
+ * @param tetromino_letter Letter most closely related to the piece shape.
+ * @returns Enumerical value representing the piece type.
+ */
 enum TetrominoType_t toType(char tetromino_letter);
+
+/**
+ * Parse the file containing wall kick data. Each piece has 4 possible offsets per rotation state pair.
+ * Wall kicks are a feature that allow pieces to rotate in circumstances they would normally not be able to. They also allow for certain spins.
+ * @warning An unknown bug prevents t-spin triples from one side, but not the other.
+ */
 void parse_kicks_file();
+
+/**
+ * Parse the file containing piece state data. Includes the shape of each piece and their rotations.
+ */
 void parse_rotations_file();
+
+/**
+ * Parse the two input files, wallkicks.dat and rotations.dat
+ */
 void parse_game_data();
+
+/**
+ * Draw the background
+ * @param itr Current frame counter.
+ */
 void draw_meteors(size_t itr);
+
+/**
+ * Converts from tetromino type to its color.
+ * @param piece The type of piece
+ */
 ColorPair_t toPieceColor(enum TetrominoType_t piece);
 // member functs ------
 
 // private
+
+/**
+ * Creates the board data of the caller, based on internal state.
+ * @param this The instance of the calling object.
+ */
 void M_matrix_make_board(Matrix*);
+
+/**
+ * Destroys the board data of the caller.
+ * @param this The instance of the calling object.
+ */
 void M_matrix_destroy_board(Matrix*);
+
+/**
+ * Creates Matrix board data, with dimensions.
+ * @param this The instance of the calling object.
+ * @param p_nrows Number of rows (height)
+ * @param p_ncols Number of columns (width)
+ */
 void matrix_make_board_rs(Matrix*, minopos_t, minopos_t);
+
+/**
+ * Does the same thing as paste_tet, but doesn't affect board data.
+ * @param this The instance of the calling object.
+ * @returns `true` if a piece could fit in the current position, `false` if it could not.
+ */
 bool M_matrix_test_tet(Matrix*);
+
+/**
+ * Adds the current tetromino to the board data.
+ * @param this The instance of the calling object.
+ * @returns `true` if a piece was pasted in the current position, `false` if it was not.
+ */
 bool M_matrix_paste_tet(Matrix*);
+
+/**
+ * Remove the current tetromino from the board data.
+ * @param this The instance of the calling object.
+ */
 void M_matrix_unpaste_tet(Matrix*);
+
+/**
+ * Sets the position of the lowest place the piece can currently reach.
+ * @param this The instance of the calling object.
+ */
 void M_matrix_set_hdrop_pos(Matrix*);
+
+/**
+ * Checks every direction to see if the current piece can move anywhere. Tests for spins.
+ * @param this The instance of the calling object.
+ * @returns `true` if stuck, `false` if not
+ */
 bool M_matrix_test_if_stuck(Matrix*);
+
+/**
+ * States that a piece is no longer dynamic and is instead part of the game board.
+ * @param this The instance of the calling object.
+ * @returns `true` if the lock succeeded, `false` if the piece failed to respawn (failure condition)
+ */
 bool M_matrix_lock(Matrix*);
+
+/**
+ * Instantly lower the current piece as far as it can go, and lock into place.
+ * @param this The instance of the calling object.
+ * @returns `true` if the drop succeeded, `false` if the piece failed to respawn (failure condition)
+ */
 bool M_matrix_hdrop(Matrix*);
+
+/**
+ * Tests the list of wallkicks specified in wallkicks.dat for the current piece.
+ * @param this The instance of the calling object.
+ * @returns `true` if a new position was found where the piece fits, `false` if no kick succeeded.
+ */
 bool M_matrix_wallkick(Matrix*, uint8_t, uint8_t);
+
+/**
+ * Checks board factors to determine which special scoring combo has occurred.
+ * @param this The instance of the calling object.
+ * @param is_stuck If the scoring piece could not move in any direction.
+ * @param lines_cleared Amount of lines cleared in the last lock alone.
+ * @param locked_piece The type of piece that caused the combo.
+ * @returns The combo type that occurred.
+ */
 enum ComboType_t M_matrix_check_combo_type(Matrix*, bool, uint16_t, enum TetrominoType_t);
+/**
+ * Calculate score based on combo type.
+ * @param this The instance of the calling object.
+ * @param current_combo The combo type returned by `M_matrix_check_combo_type`
+ * @returns The amount of points added to the total.
+ */
 size_t M_matrix_add_score(Matrix* this, enum ComboType_t current_combo);
 
 // public
+
+/**
+ * Initialize all default data for a Matrix (tetris game board)
+ * @returns A new heap-allocated `Matrix*` object for all game state. Free with `matrix_destruct(obj)`
+ */
 Matrix* matrix_construct();
+/**
+ * Deletes data associated with the current game.
+ * @param this The instance of the calling object.
+ * @warning param `this` should be set to NULL after call to avoid use-after-free.
+ */
 void matrix_destruct(Matrix*);
+/**
+ * Sets the current piece
+ * @param this The instance of the calling object.
+ * @param kind The enum piece type to be set.
+ * @param rot_index A number (0-3) representing the initial rotation state of the piece.
+ */
 void matrix_set_current_piece(Matrix*, enum TetrominoType_t, uint8_t);
+/**
+ * Queues a piece to be instantly snapped to the floor and locked (hard dropping)
+ * @param this The instance of the calling object.
+ */
 void matrix_hdrop(Matrix*);
+/**
+ * Spawned the piece specified by `Matrix::_currentPiece` at `Matrix::_root<X/Y>`
+ * @param this The instance of the calling object.
+ * @warning Effective immediately, does not handle scoring, line clearing, or unpasting. Use to initialize.
+ * @returns `true` if the piece successfully spawned at `Matrix::_root<X/Y>`, `false` if not (failure condition)
+ */
 bool matrix_respawn_tet(Matrix*);
+/**
+ * Sets the current piece to a random (7bag) tetromino, and spawns a new one at `Matrix::_root<X/Y>`
+ * @param this The instance of the calling object.
+ * @warning Effective immediately, does not handle scoring, line clearing, or unpasting. Use to initialize.
+ * @returns `true` if the piece successfully spawned at `Matrix::_root<X/Y>`, `false` if not (failure condition)
+ */
 bool matrix_respawn_tet_random(Matrix*);
+/**
+ * Rotates the current piece
+ * @param this The instance of the calling object.
+ * @param dir `-1` for counter-clockwise, `+1` for clockwise
+ * @returns `true` if the rotation succeeded, `false` if the rotation failed.
+ */
 bool matrix_rotate_piece(Matrix*, int8_t);
+/**
+ * Moves the current piece left or right.
+ * @param this The instance of the calling object.
+ * @param shift amount of positions left or right (-, +) to attempt to shift the piece.
+ * @returns `true` if the slide was successful, `false` if the slide failed.
+ */
 bool matrix_slide_piece(Matrix*, int8_t);
-uint16_t matrix_test_lines(Matrix*);
+/**
+ * Tests for line clears and makes a new board with full lines removed and shifted downwards. 
+ * @param this The instance of the calling object.
+ * @returns The count of lines cleared during the method call.
+ */
+uint16_t matrix_clear_lines(Matrix*);
+/**
+ * Lowers the piece by `Matrix::_gravity` positions. 
+ * @param this The instance of the calling object.
+ * @returns `true` if the piece managed to move downward, `false` if the piece was stopped from moving early.
+ */
 bool matrix_apply_gravity(Matrix*);
+/**
+ * "Holds" a piece for later, placing it in a variable and respawning the current piece.
+ * @param this The instance of the calling object.
+ * @returns Whether or not a game-ending condition has occurred
+ */
 bool matrix_hold_piece(Matrix*);
+/** 
+ * Handle basic game logic. (moving piece down, locking pieces into place, processing hard drops)
+ * @param this The instance of the calling object.
+ * @returns Whether or not a game-ending condition has occurred.
+ */
 bool matrix_update(Matrix*);
+/**
+ * Draw the playfield at the center of the screen. (only replaces areas covered by playfield)
+ * @param this The instance of the calling object.
+ */
 void matrix_draw(Matrix*);
+/** 
+ * Handle what happens when the player fails.
+ * @param this The instance of the calling object.
+ * @warning Self-deletes upon call! Ensure calling object is set to proper null state.
+ */
 void matrix_death(Matrix*);
 
 // end member functs --
@@ -232,6 +453,7 @@ int main() {
     int ncols = 10;
     uint8_t selected_idx = 0;
     int* opt_value = NULL;
+    bool drawbg_flag = true;
 
     int c = 0;
     size_t itr = 0;
@@ -247,11 +469,11 @@ int main() {
                 }
             }
         }
-        
-        draw_meteors(itr);
+        if (drawbg_flag)
+            draw_meteors(itr);
 
         if (menu_state) {
-
+            // very quick and dirty menu code
             GCOLOR(DEFAULT, mvaddstr(1, 1, "Basic Controls:"));
             GCOLOR(DEFAULT, mvaddstr(2, 1, " - Menu Nav: J/L"));
             GCOLOR(DEFAULT, mvaddstr(3, 1, " - Option Select: I/K"));
@@ -271,11 +493,12 @@ int main() {
             GCOLOR(DEFAULT, draw_text_centered(scrx / 2, 1, highscore_str));
             GCOLOR(DEFAULT, draw_text_centered(scrx / 2, 2, highlines_str));
 
-            #define OPTCOUNT 4
+            #define OPTCOUNT 5
             char* opts[OPTCOUNT] = {
                 "Start Game",
                 col_str,
                 row_str,
+                "Toggle BG (helps bandwidth)",
                 "Exit"
             };
 
@@ -285,12 +508,16 @@ int main() {
                     if (selected_idx == 0) opt_value = NULL;
                     if (selected_idx == 1) opt_value = &ncols;
                     if (selected_idx == 2) opt_value = &nrows;
+                    if (selected_idx == 3) opt_value = NULL;
+                    if (selected_idx == 4) opt_value = NULL;
                 break;
                 case 'j':
                     selected_idx = (uint8_t)((selected_idx + OPTCOUNT - 1) % OPTCOUNT);
                     if (selected_idx == 0) opt_value = NULL;
                     if (selected_idx == 1) opt_value = &ncols;
                     if (selected_idx == 2) opt_value = &nrows;
+                    if (selected_idx == 3) opt_value = NULL;
+                    if (selected_idx == 4) opt_value = NULL;
                 break;
                 case ' ':
                     if (selected_idx == 0) {
@@ -303,6 +530,9 @@ int main() {
                         matrix_respawn_tet_random(mat);
                     }
                     if (selected_idx == 3) {
+                        drawbg_flag = !drawbg_flag;
+                    }
+                    if (selected_idx == 4) {
                         close_main();
                         return 0;
                     }
@@ -748,7 +978,6 @@ void draw_text_centered(int x_cent, int y_cent, const char* str) {
     mvaddstr(y_cent, x_start, str);
 }
 
-// initialize class
 Matrix* matrix_construct() {
     Matrix* ret = (Matrix*)calloc(1, sizeof(Matrix));
     ret->_ncols = 10; // these could be #defines, but I feel like making it adjustable
@@ -789,6 +1018,7 @@ Matrix* matrix_construct() {
     ret->_lastScoringPiece = INVALID;
 
     ret->_comboAnimTimer = 0;
+    ret->_comboAnimTimer = 9999;
 
     ret->_board = NULL;
     M_matrix_make_board(ret); // default size
@@ -815,7 +1045,7 @@ void M_matrix_make_board(Matrix* this) {
         this->_board[row] = (struct Mino*)calloc((size_t)this->_ncols, sizeof(struct Mino));
     }
 }
-// resize overload (unused)
+// resize overload 
 void matrix_make_board_rs(Matrix* this, minopos_t p_nrows, minopos_t p_ncols) {
     if (this->_board != NULL) {
         M_matrix_destroy_board(this);
@@ -853,7 +1083,7 @@ bool M_matrix_test_tet(Matrix* this) {
     }
     return true;
 }
-// pastes the current tetromino into the matrix
+
 bool M_matrix_paste_tet(Matrix* this) {
     if (this->_currentPiece == INVALID) FAIL("Invalid game action! Attempted to paste an empty piece.\n");
 
@@ -892,7 +1122,6 @@ void M_matrix_unpaste_tet(Matrix* this) {
     }
 }
 
-// for dropping the piece instantly with space, as well as the preview
 void M_matrix_set_hdrop_pos(Matrix* this) {
     M_matrix_unpaste_tet(this);
     minopos_t start_y = this->_tetY;
@@ -910,7 +1139,6 @@ void M_matrix_set_hdrop_pos(Matrix* this) {
     M_matrix_paste_tet(this);
 }
 
-// for spins
 bool M_matrix_test_if_stuck(Matrix* this) {
     M_matrix_unpaste_tet(this);
     bool flag = false;
@@ -1028,6 +1256,7 @@ bool M_matrix_hdrop(Matrix* this) {
     if (!this->_hdropQueued) return true;
     this->_hdropQueued = false;
     M_matrix_unpaste_tet(this);
+    this->_points += (size_t)(this->_hdropY - this->_tetY);
     this->_tetX = this->_hdropX;
     this->_tetY = this->_hdropY;
     M_matrix_paste_tet(this);
@@ -1134,7 +1363,7 @@ bool matrix_slide_piece(Matrix* this, int8_t shift) {
     }
 }
 
-uint16_t matrix_test_lines(Matrix* this) {
+uint16_t matrix_clear_lines(Matrix* this) {
 
     struct Mino** next_board = (struct Mino**)calloc((size_t)this->_nrows, sizeof(struct Mino*));
     for (minopos_t row = 0; row < this->_nrows; row++) {
@@ -1152,9 +1381,10 @@ uint16_t matrix_test_lines(Matrix* this) {
         }
         if (!line_flag) {
             for (minopos_t x = 0; x < this->_ncols; x++) {
+                // insert backwards
                 next_board[this->_nrows - 1 - lines_not_cleared][x] = this->_board[y][x];
             }
-            lines_not_cleared++;
+            lines_not_cleared++; // index for inserting at the top of the new board
         } else {
             lines_cleared++;
         }
@@ -1190,7 +1420,6 @@ void matrix_death(Matrix* this) {
     // self-delete
     matrix_destruct(this);
 }
-// return "false" is for failure to spawn piece (death condition)
 bool matrix_hold_piece(Matrix* this) {
     if (!this->_holdAllowable) return true;
 
@@ -1228,7 +1457,7 @@ bool M_matrix_lock(Matrix* this) {
     M_matrix_paste_tet(this);
 
     enum TetrominoType_t last_dropped = this->_currentPiece;
-    uint16_t lines_cleared = matrix_test_lines(this);
+    uint16_t lines_cleared = matrix_clear_lines(this);
     this->_linesCleared += lines_cleared;
 
     enum ComboType_t current_combo = M_matrix_check_combo_type(this, is_stuck, lines_cleared, last_dropped);
@@ -1250,7 +1479,6 @@ bool M_matrix_lock(Matrix* this) {
     return matrix_respawn_tet_random(this);
 }
 
-// false = death
 bool matrix_update(Matrix* this) {
     this->_updateFrameCounter = (this->_updateFrameCounter + 1) % this->_updateFrameDelay;
     this->_comboAnimTimer++;
@@ -1359,17 +1587,16 @@ void matrix_draw(Matrix* this) {
         const char* combo_text = combo_to_name(this->_lastCombo);
         int32_t combo_text_len = (int)strlen(combo_text);
         if (this->_lastPoints < 800)
-            GCOLOR(DEFAULT, draw_text_centered(winx, starty + STATE_DIM + this->_rootY + 3, combo_text))
+            GCOLOR(DEFAULT, draw_text_centered(winx, starty + 3, combo_text))
         else
-            GCOLOR(GOLDEN, draw_text_centered(winx, starty + STATE_DIM + this->_rootY + 3, combo_text));
-
+            GCOLOR(GOLDEN, draw_text_centered(winx, starty + 3, combo_text));
 
         if (this->_comboAnimTimer < COMBO_ANIM_LEN / 2) {
             float t = (float)this->_comboAnimTimer / (float)(COMBO_ANIM_LEN / 2);
             for (int mask_x = -combo_text_len / 2; mask_x <= combo_text_len / 2; mask_x++) {
                 // shutter effect
                 if ((float)(mask_x + combo_text_len / 2) / (float)(combo_text_len) > t) {
-                    GCOLOR(BG, mvaddch(starty + STATE_DIM + this->_rootY + 3, winx + mask_x, ' '))
+                    GCOLOR(SPAWN_ZONE, mvaddch(starty + 3, winx + mask_x, ' '))
                 }
             }
         } else if (this->_comboAnimTimer > 3 * COMBO_ANIM_LEN / 4) {
@@ -1377,7 +1604,7 @@ void matrix_draw(Matrix* this) {
             for (int mask_x = -combo_text_len / 2; mask_x <= combo_text_len / 2; mask_x++) {
                 // shutter effect
                 if ((float)(mask_x + combo_text_len / 2) / (float)(combo_text_len) < t) {
-                    GCOLOR(BG, mvaddch(starty + STATE_DIM + this->_rootY + 3, winx + mask_x, ' '))
+                    GCOLOR(SPAWN_ZONE, mvaddch(starty + 3, winx + mask_x, ' '))
                 }
             }
         }
